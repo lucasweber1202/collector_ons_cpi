@@ -82,13 +82,8 @@ def test_summary_reports_zero_coverage_when_nothing_was_checked() -> None:
     assert max_residual == 0.0
 
 
-def test_months_without_published_weights_do_not_depress_coverage() -> None:
-    """A month with no published weights is not reconcilable at source.
-
-    W1 only starts in 2008, so a full backfill leaves ~240 such months. They are
-    reported separately rather than counted against coverage, otherwise a
-    legitimate backfill could never clear the strict-validation floor.
-    """
+def test_recent_missing_weight_month_depresses_coverage() -> None:
+    """A missing recent month is a defect, not a source-window exception."""
     march = date(2026, 3, 1)
     observations: dict[date, dict[str, float | None]] = {
         **OBSERVATIONS,
@@ -100,9 +95,19 @@ def test_months_without_published_weights_do_not_depress_coverage() -> None:
     _, _, skipped, coverage, _ = log_validation_summary(results, skips, "Bottom-up")
 
     assert len(results) == 1  # only March carries weights
-    assert skips[SKIP_OUTSIDE_WEIGHTS_WINDOW] == 1  # February has none
+    assert skips[SKIP_OUTSIDE_WEIGHTS_WINDOW] == 0  # 2026 is within source coverage
     assert skipped == 1
-    assert coverage == 1.0
+    assert coverage == 0.5
+
+
+def test_only_actual_pre_2008_months_are_exempt() -> None:
+    observations = {
+        date(2007, 1, 1): OBSERVATIONS[JANUARY],
+        date(2007, 2, 1): OBSERVATIONS[FEBRUARY],
+    }
+    results, skips = validate_bottom_up(observations, {}, HIERARCHY)
+    assert not results
+    assert skips == Counter({SKIP_OUTSIDE_WEIGHTS_WINDOW: 1})
 
 
 def test_full_coverage_reports_one() -> None:

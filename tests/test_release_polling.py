@@ -80,5 +80,5 @@ def test_release_returns_immediately_anchored_to_january(
     assert release is not None
     parsed, validation_start = release
     assert max(parsed) == EXPECTED
-    assert validation_start == date(2026, 1, 1)
+    assert validation_start == date(2025, 12, 1)
     assert len(downloads) == 1

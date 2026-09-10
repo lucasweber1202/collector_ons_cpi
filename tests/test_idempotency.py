@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, event, text
 from scripts.extract import _make_series_id
 from scripts.metadata import upsert_metadata
 from scripts.run_logs import insert_run_log
-from scripts.time_series import upsert_time_series
+from scripts.time_series import get_max_reference_date, upsert_time_series
 from scripts.weights import upsert_weights
 
 
@@ -64,6 +64,7 @@ def test_second_write_is_data_noop_and_log_is_appended(tmp_path: Path) -> None:
     collected_at = datetime(2026, 8, 19, 7, 1)  # noqa: DTZ001 -- SQLite test adapter.
 
     assert upsert_time_series(engine, parsed, collected_at) == (1, 0)
+    assert get_max_reference_date(engine) == date(2026, 7, 1)
     assert upsert_weights(engine, weights, collected_at) == (1, 0)
     assert upsert_metadata(engine, parsed, collected_at) == (1, 0)
     insert_run_log(engine, collected_at, collected_at, "success", "first", None)

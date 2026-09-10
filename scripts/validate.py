@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections import Counter
 from datetime import date
 from itertools import pairwise
@@ -17,6 +18,8 @@ logger = logging.getLogger(__name__)
 # source. They are reported separately and excluded from the coverage
 # denominator; every other skip reason means a check that should have run.
 SKIP_OUTSIDE_WEIGHTS_WINDOW = "month outside published weights window"
+SKIP_MISSING_WEIGHT_MONTH = "missing weights inside published source window"
+SKIP_MISSING_OBSERVATION_MONTH = "nonconsecutive observation months"
 SKIP_PARENT_WITHOUT_WEIGHT = "parent series has no weight"
 SKIP_CHILD_WITHOUT_WEIGHT = "child series has no weight"
 SKIP_PARENT_WITHOUT_OBSERVATION = "parent series has no usable observation"
@@ -53,8 +56,7 @@ def build_hierarchy(series_ids: list[str]) -> dict[str, list[str]]:
             continue
         parents = by_node.get(parent_node, [])
         if len(parents) != 1:
-            logger.warning("Cannot resolve unique parent %s for node %s", parent_node, node)
-            continue
+            raise ValueError(f"Cannot resolve unique parent {parent_node} for node {node}")
         hierarchy.setdefault(parents[0], []).extend(children_at_node)
     return {parent: sorted(children) for parent, children in hierarchy.items()}
 
@@ -116,10 +118,12 @@ def validate_bottom_up(
     weights_by_date: dict[date, dict[str, float]],
     hierarchy: dict[str, list[str]],
     tolerance_pp: float = VALIDATION_TOLERANCE_PP,
+    *,
+    operational: bool = False,
 ) -> tuple[list[dict[str, Any]], Counter[str]]:
     """Reconstruct monthly parent inflation from price-updated child weights.
 
-    Official basket weights remain untouched in storage. For each parent/month
+    Official basket weights remain untouched in original_weights. For each parent/month
     this check price-updates the immediate-child weights to the ONS price
     reference month, normalizes them locally, takes their weighted average price
     relative, and compares it with the published parent price relative:
@@ -143,12 +147,18 @@ def validate_bottom_up(
         if (ref_date.year * 12 + ref_date.month) - (
             previous_date.year * 12 + previous_date.month
         ) != 1:
+            skips[SKIP_MISSING_OBSERVATION_MONTH] += len(hierarchy)
             continue
         current = observations[ref_date]
         previous = observations[previous_date]
         weights = weights_by_date.get(ref_date)
         if not weights:
-            skips[SKIP_OUTSIDE_WEIGHTS_WINDOW] += len(hierarchy)
+            reason = (
+                SKIP_OUTSIDE_WEIGHTS_WINDOW
+                if ref_date < date(2008, 1, 1)
+                else SKIP_MISSING_WEIGHT_MONTH
+            )
+            skips[reason] += len(hierarchy)
             continue
         reference_date = price_reference_month(ref_date)
         reference = observations.get(reference_date, {})
@@ -164,31 +174,33 @@ def validate_bottom_up(
                 if child in weights
                 and current.get(child) is not None
                 and previous.get(child) not in (None, 0)
-                and reference.get(child) not in (None, 0)
+                and (operational or reference.get(child) not in (None, 0))
             ]
             if len(usable) != len(children):
                 if any(child not in weights for child in children):
                     skips[SKIP_CHILD_WITHOUT_WEIGHT] += 1
-                elif any(reference.get(child) in (None, 0) for child in children):
+                elif not operational and any(
+                    reference.get(child) in (None, 0) for child in children
+                ):
                     skips[SKIP_PRICE_REFERENCE_MISSING] += 1
                 else:
                     skips[SKIP_CHILD_WITHOUT_OBSERVATION] += 1
                 continue
             updated = {
-                child: weights[child] * float(previous[child]) / float(reference[child])
+                child: (
+                    weights[child]
+                    if operational
+                    else weights[child] * float(previous[child]) / float(reference[child])
+                )
                 for child in usable
             }
             weight_total = sum(updated.values())
             if weight_total == 0:
                 skips[SKIP_ZERO_WEIGHT_TOTAL] += 1
                 continue
-            reconstructed_relative = (
-                sum(
-                    updated[child] * float(current[child]) / float(previous[child])
-                    for child in usable
-                )
-                / weight_total
-            )
+            reconstructed_relative = sum(
+                updated[child] * float(current[child]) / float(previous[child]) for child in usable
+            ) / (1.0 if operational else weight_total)
             published_relative = float(parent_now) / float(parent_before)
             residual_pp = (reconstructed_relative - published_relative) * 100.0
             results.append(
@@ -205,6 +217,54 @@ def validate_bottom_up(
                 }
             )
     return results, skips
+
+
+def derive_operational_weights(
+    observations: dict[date, dict[str, float | None]],
+    basket: dict[date, dict[str, float]],
+    hierarchy: dict[str, list[str]],
+) -> dict[date, dict[str, float]]:
+    """Price-update W1 to local shares; never invent missing reference levels.
+
+    The returned weights multiply month-on-month price relatives directly.
+    Official W1 points per thousand belong exclusively in original_weights.
+    """
+    result: dict[date, dict[str, float]] = {}
+    children_set = {child for children in hierarchy.values() for child in children}
+    for month, official in sorted(basket.items()):
+        ordinal = month.year * 12 + month.month - 2
+        previous = observations.get(date(ordinal // 12, ordinal % 12 + 1, 1), {})
+        reference = observations.get(price_reference_month(month), {})
+        if month not in observations:
+            continue
+        derived: dict[str, float] = {
+            series_id: 1.0
+            for series_id, value in observations[month].items()
+            if series_id not in children_set and value is not None and previous.get(series_id)
+        }
+        for parent, children in hierarchy.items():
+            if not all(
+                child in official
+                and previous.get(child) not in (None, 0)
+                and reference.get(child) not in (None, 0)
+                for child in children
+            ):
+                continue
+            updated = {
+                child: official[child] * float(previous[child]) / float(reference[child])
+                for child in children
+            }
+            if any(not math.isfinite(value) or value < 0 for value in updated.values()):
+                raise ValueError(f"Invalid operational weights at {month} for {parent}")
+            total = sum(updated.values())
+            if total <= 0:
+                continue
+            derived.update({child: value / total for child, value in updated.items()})
+            if parent not in children_set:
+                derived[parent] = 1.0
+        if derived:
+            result[month] = derived
+    return result
 
 
 def log_validation_summary(

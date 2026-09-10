@@ -93,6 +93,8 @@ def get_max_reference_date(engine: Engine) -> date | None:
         value = conn.execute(text(f"SELECT MAX(reference_date) FROM {_TABLE}")).scalar()
     if isinstance(value, datetime):
         return value.date()
+    if isinstance(value, str):
+        return date.fromisoformat(value)
     return value
 
 

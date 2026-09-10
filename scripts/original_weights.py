@@ -1,4 +1,4 @@
-"""Persist local operational CPI shares with observation-style vintage semantics."""
+"""Persist official ONS basket weights with the same vintage semantics as observations."""
 
 from __future__ import annotations
 
@@ -10,31 +10,23 @@ from typing import Any
 from sqlalchemy import TextClause, text
 from sqlalchemy.engine import Connection, Engine
 
-from scripts.config import SCHEMA_NAME, WEIGHTS_TABLE
+from scripts.config import ORIGINAL_WEIGHTS_TABLE, SCHEMA_NAME
 
 logger = logging.getLogger(__name__)
-_TABLE = f"{SCHEMA_NAME}.{WEIGHTS_TABLE}"
-
-
-def assert_operational_storage(engine: Engine) -> None:
-    """Refuse to mix legacy baskets in parts per thousand with local shares."""
-    with engine.connect() as conn:
-        legacy = conn.execute(
-            text(f"SELECT COUNT(*) FROM {_TABLE} WHERE weight > 1 OR weight < 0")
-        ).scalar_one()
-    if legacy:
-        raise ValueError(
-            "weights contains legacy basket points; archive/rebuild this table "
-            "with reviewed full-history inputs before storing operational shares"
-        )
-
-
+_TABLE = f"{SCHEMA_NAME}.{ORIGINAL_WEIGHTS_TABLE}"
 BATCH_SIZE = 500
 ROUND_DECIMALS = 10
 
-_COLUMNS = ("series_id", "reference_date", "vintage_date", "weight", "collected_at")
+_COLUMNS = (
+    "series_id",
+    "reference_date",
+    "vintage_date",
+    "weight",
+    "collected_at",
+    "weight_base_year",
+)
 _KEY_COLUMNS = ("series_id", "reference_date", "vintage_date")
-_UPDATE_COLUMNS = ("weight", "collected_at")
+_UPDATE_COLUMNS = ("weight", "collected_at", "weight_base_year")
 # See scripts/time_series.py: MERGE keeps a batch of same-day revisions in one
 # statement; the fallback is only reached by the SQLite engine used in tests.
 _MERGE_DIALECTS = frozenset({"databricks", "postgresql"})
@@ -119,12 +111,12 @@ def _latest(engine: Engine, minimum_date: date) -> dict[tuple[str, date], dict[s
     return result
 
 
-def upsert_weights(
+def upsert_original_weights(
     engine: Engine,
     weights_by_date: dict[date, dict[str, float]],
     collected_at: datetime | None = None,
 ) -> tuple[int, int]:
-    """Write operational weights idempotently and return ``(new, new_vintages)``."""
+    """Write official weights idempotently and return ``(new, new_vintages)``."""
     collected_at = collected_at or datetime.now(UTC)
     today = collected_at.date()
     incoming: list[dict[str, Any]] = []
@@ -138,6 +130,7 @@ def upsert_weights(
                         "reference_date": reference_date,
                         "weight": weight,
                         "collected_at": collected_at,
+                        "weight_base_year": reference_date.year,
                     }
                 )
     logger.info("Weights upsert: evaluating %d incoming weights", len(incoming))

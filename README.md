@@ -15,13 +15,15 @@ Official sources:
 
 - `metadata`: one row per CPI series.
 - `time_series`: official monthly index levels, vintage tracked.
-- `weights`: official basket weights in parts per 1,000, monthly-expanded using
-  the correct January and February-to-December regimes, vintage tracked.
+- `weights`: derived local shares used directly for monthly reconstruction.
+- `original_weights`: all classified W1 basket rows in points per 1,000,
+  preserving monthly regimes and publication vintages, including weight-only subclasses.
 - `logs`: one row per execution, including validation summaries.
 
-The additional `weights` table is the approved forecast-target exception to the
-fleet's standard three-table contract. Values are stored exactly as published;
-normalization occurs only in memory during reconciliation.
+The additional weight tables and regime-safe original-weight key are approved
+UK forecast-target exceptions. See [COMPLIANCE.md](COMPLIANCE.md) for the exact
+contract, upgrade safeguards, evidence and remaining release gates. This branch
+is not yet certified for production or full consumption-segment coverage.
 
 ## Quickstart
 
@@ -37,10 +39,9 @@ python main.py --no-watch
 
 On a populated database, `python main.py` waits for the next expected monthly
 release. Use `--no-watch` for a single revision-lookback pass, `--start-date`
-for a backfill, `--strict-validation` to make tolerance breaches, insufficient
-reconciliation coverage, or an empty check set fatal, and
+for a backfill. Validation failures always stop ingestion; `--strict-validation`
+is retained only for CLI compatibility. Use
 `--export-validation` to create an analyst workbook under `_verify_xls/`.
 
 See [METHODOLOGY.md](METHODOLOGY.md) for the hierarchy and reconciliation
 contract.
-

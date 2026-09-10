@@ -20,7 +20,7 @@ annual regimes above consumption-segment level:
 - the January-reference weights apply from February through December.
 
 The collector expands each source regime to its applicable reference months and
-stores the published absolute weights unchanged. Pre-2017 annual weights apply
+stores the published absolute weights unchanged in original_weights. Pre-2017 annual weights apply
 to all twelve months of their year.
 
 ## Hierarchy
@@ -62,17 +62,24 @@ because they are overlapping cuts rather than a single additive tree.
    -0.1078 pp in July, breaching the 0.10 pp tolerance on perfectly consistent
    data.
 
-The bottom-up check is diagnostic by default. Measured against the current
-published workbook (173 series, 37 reconcilable parents, 4,218 parent-months
-from 2017 onward), the price-updated formula reconciles every check: the median
-absolute residual is 0.0003 pp and the maximum is 0.0015 pp, which is the
-rounding granularity of the one-decimal published index levels. No parent-month
-breaches the 0.10 pp tolerance. Residuals materially above that level indicate a
-parsing, hierarchy or weight-matching defect rather than ONS methodology.
-`--strict-validation` is provided for controlled validation runs, while ordinary
-ingestion logs the ten worst exceptions without discarding official
-observations.
+All three checks (basket sums, official-basket reconstruction and direct
+operational-share reconstruction) are mandatory before persistence. The current
+full W1 window produces 8,251 bottom-up checks across 37 parents, with maximum
+absolute residual 0.0019795967 pp. Table 38 publishes three-decimal levels.
+The default 0.10 pp tolerance is a conservative historical configuration, not
+a claim that published rounding is 0.10 pp. Tightening it requires review of
+historical regimes and a separately agreed error budget.
 
-The optional Excel export mirrors the collected levels, official weights,
-series/parent map, and every reconciliation result.
+The exact source basket is retained in original_weights. Operational phi weights
+are persisted in weights, with 1.0 for standalone roots. The operational
+validation applies stored shares directly, without normalization or another
+price update. Weights are only derived where required price-reference indices
+exist. Extraction includes the preceding December to validate January links.
 
+The optional Excel export contains Time Series, Weights, Original Weights,
+Series Map, Original Weight Map and Validation. It is an in-memory validation
+snapshot, not a database vintage export.
+
+See [COMPLIANCE.md](COMPLIANCE.md) for approved UK-local schema exceptions,
+the deterministic classification aliases, complete weight-only source coverage,
+upgrade safety and the remaining consumption-segment and deployment gates.

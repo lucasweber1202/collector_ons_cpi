@@ -9,7 +9,6 @@ import math
 import re
 import time
 from datetime import date
-from difflib import SequenceMatcher
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -40,12 +39,35 @@ CPI_DOWNLOAD_URL = (
     "consumerpriceinflation%2Fcurrent%2Fconsumerpriceinflationdetailedreferencetables.xlsx"
 )
 
-# A W1 label must reach this combined score (name similarity plus a bonus for an
-# exact hierarchy node) before its weight is attributed to a Table 38 series.
-WEIGHT_MATCH_THRESHOLD = 0.50
-# Below this gap between the best and second-best candidate the label did not
-# really decide the mapping, so the match is reported for human verification.
-AMBIGUOUS_MATCH_MARGIN = 0.05
+# Explicit W1 combined/split classifications verified against Table 38 CDIDs.
+W1_ALIASES = {
+    "05.3.1/2": "D7E3",
+    "06.1.2/3": "D7F8",
+    "06.2.1/3": "D7FA",
+    "07.1.1A": "D7E8",
+    "07.1.1B": "D7E9",
+    "07.1.2/3": "D7EA",
+    "07.3.2/6": "D7EG",
+    "08.2/3": "D7EM",
+    "09.2.1/2/3": "D7FD",
+    "09.3.4/5": "D7EU",
+    "09.5.3/4": "D7FM",
+    "12.1.2/3": "D7EZ",
+    "12.5.3/5": "D7EQ",
+}
+_ORIGINAL_WEIGHTS: dict[date, dict[str, float]] = {}
+_ORIGINAL_WEIGHT_CATALOG: dict[str, dict[str, str]] = {}
+
+
+def get_original_weights() -> dict[date, dict[str, float]]:
+    """Return source-published weights, including weight-only subclasses."""
+    return {month: dict(values) for month, values in _ORIGINAL_WEIGHTS.items()}
+
+
+def get_original_weight_catalog() -> dict[str, dict[str, str]]:
+    """Return original classification labels and explicit Table 38 mappings."""
+    return {key: dict(value) for key, value in _ORIGINAL_WEIGHT_CATALOG.items()}
+
 
 ECO_GROUPS = frozenset({"consumer_prices"})
 UNITS = frozenset({"index"})
@@ -263,63 +285,31 @@ def _weight_code_name(raw_name: object) -> tuple[str, str] | None:
     match = re.match(r"^(\d{1,2}(?:\.\d+(?:/\d+)*)*(?:[AB])?)\s+(.+)$", text)
     if match:
         code = match.group(1)
-        if code.count(".") <= 2:
-            return code, match.group(2).strip()
-        return None
+        return code, match.group(2).strip()
+    if text.lower() in {"all goods", "all services"}:
+        return text.upper().replace(" ", ""), text
     if "overall index" in text.lower():
-        return "0", "CPI ALL ITEMS"
+        return "0", text
     return None
 
 
 def _match_weight_series(code: str, name: str, catalog: dict[str, dict[str, str]]) -> str | None:
-    """Match W1 rows to Table 38 series using hierarchy code and official label."""
+    """Use exact classification or reviewed CDID aliases, never fuzzy matching."""
+    if code.count(".") > 2 or code in {"ALLGOODS", "ALLSERVICES"}:
+        return None
     family, node = _node_token(code)
-    if family != "COICOP":
-        return None
-
-    def compatible(candidate_node: str) -> bool:
-        if candidate_node == node:
-            return True
-        if node.startswith("G") and candidate_node.startswith("G"):
-            return candidate_node[1:3] == node[1:3]
-        if node.startswith("C") and candidate_node.startswith("C"):
-            return candidate_node[1:4] == node[1:4]
-        return False
-
+    native_id = W1_ALIASES.get(code)
     candidates = [
-        (series_id, fields)
+        series_id
         for series_id, fields in catalog.items()
-        if fields["family"] == "COICOP" and compatible(fields["node"])
+        if fields["family"] == family
+        and (fields["native_id"] == native_id if native_id else fields["node"] == node)
     ]
-    if not candidates:
-        return None
-    target = _slug(name)
-    scored = sorted(
-        (
-            (
-                SequenceMatcher(None, target, _slug(fields["name"])).ratio()
-                + (0.35 if fields["node"] == node else 0.0),
-                series_id,
-            )
-            for series_id, fields in candidates
-        ),
-        reverse=True,
-    )
-    score, series_id = scored[0]
-    if score < WEIGHT_MATCH_THRESHOLD:
-        return None
-    if len(scored) > 1 and score - scored[1][0] < AMBIGUOUS_MATCH_MARGIN:
-        # A near-tie means the label alone did not decide the mapping. The
-        # weight still lands somewhere, so surface it rather than trust it.
-        logger.warning(
-            "W1 row code=%s name=%s matched %s by only %.4f over runner-up %s; verify the mapping",
-            code,
-            name,
-            series_id,
-            score - scored[1][0],
-            scored[1][1],
-        )
-    return series_id
+    if len(candidates) > 1:
+        raise ValueError(f"Ambiguous W1 mapping: {code} {name}: {candidates}")
+    if native_id and not candidates:
+        raise ValueError(f"Reviewed W1 alias {code} requires missing CDID {native_id}")
+    return candidates[0] if candidates else None
 
 
 def parse_weights_workbook(
@@ -328,6 +318,10 @@ def parse_weights_workbook(
     start_date: date | None = None,
 ) -> dict[date, dict[str, float]]:
     """Parse official W1 CPI weights and expand each annual regime by month."""
+    _ORIGINAL_WEIGHTS.clear()
+    _ORIGINAL_WEIGHT_CATALOG.clear()
+    originals: dict[date, dict[str, float]] = {}
+    original_catalog: dict[str, dict[str, str]] = {}
     frame = _excel_frame(blob, "W1-CPI")
     headers = {
         column: _weight_header(frame.iat[4, column]) for column in range(3, len(frame.columns))
@@ -342,6 +336,12 @@ def parse_weights_workbook(
         if label is None:
             continue
         series_id = _match_weight_series(label[0], label[1], catalog)
+        original_id = "CPI_W1_" + label[0].replace(".", "P").replace("/", "S")
+        original_catalog[original_id] = {
+            "code": label[0],
+            "name": label[1],
+            "mapped_series_id": series_id or "",
+        }
         if series_id is None:
             # An official weight we cannot attribute is a reconciliation gap, not
             # noise: report it instead of dropping the row silently.
@@ -352,7 +352,6 @@ def parse_weights_workbook(
                 label[0],
                 label[1],
             )
-            continue
         if series_id in claimed_by and claimed_by[series_id] != label:
             # Two official rows describing one series is a mapping the last
             # write would otherwise resolve silently.
@@ -362,8 +361,9 @@ def parse_weights_workbook(
                 *label,
                 series_id,
             )
-        claimed_by[series_id] = label
-        matched.add(series_id)
+        if series_id is not None:
+            claimed_by[series_id] = label
+            matched.add(series_id)
         for column, header in headers.items():
             if header is None:
                 continue
@@ -374,24 +374,27 @@ def parse_weights_workbook(
                 continue
             if not math.isfinite(weight):
                 continue
+            if weight < 0:
+                raise ValueError(f"Negative W1 weight: {label}")
             year, months = header
             for month in months:
                 ref_date = date(year, month, 1)
                 if start_date and ref_date < start_date.replace(day=1):
+                    continue
+                original_month = originals.setdefault(ref_date, {})
+                if original_id in original_month and original_month[original_id] != weight:
+                    raise ValueError(f"Conflicting W1 weights for {original_id} at {ref_date}")
+                original_month[original_id] = weight
+                if series_id is None:
                     continue
                 previous = parsed.setdefault(ref_date, {}).get(series_id)
                 if previous is not None and previous != weight:
                     # Duplicate rows agreeing on a value are harmless; disagreeing
                     # ones mean the stored weight depends on workbook row order.
                     conflicts += 1
-                    logger.warning(
-                        "Conflicting W1 weights for %s at %s: %r then %r (row %d, code=%s)",
-                        series_id,
-                        ref_date,
-                        previous,
-                        weight,
-                        row,
-                        label[0],
+                    raise ValueError(
+                        f"Conflicting W1 weights for {series_id} at {ref_date}: "
+                        f"{previous!r} then {weight!r} (row {row}, code={label[0]})"
                     )
                 parsed[ref_date][series_id] = weight
     if not parsed:
@@ -405,6 +408,8 @@ def parse_weights_workbook(
         unmatched,
         conflicts,
     )
+    _ORIGINAL_WEIGHTS.update(originals)
+    _ORIGINAL_WEIGHT_CATALOG.update(original_catalog)
     return parsed
 
 
