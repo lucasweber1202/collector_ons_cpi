@@ -49,12 +49,8 @@ def test_conflicting_duplicate_rows_are_reported(caplog: pytest.LogCaptureFixtur
     """Disagreeing duplicates make the stored weight depend on row order."""
     blob = _workbook([("10 Education", 34.2466), ("10.0 Education", 99.9999)])
 
-    with caplog.at_level(logging.WARNING, logger="scripts.extract"):
-        parsed = parse_weights_workbook(blob, CATALOG)
-
-    assert parsed[date(2026, 6, 1)][EDUCATION] == pytest.approx(99.9999)
-    conflicts = [r for r in caplog.records if "Conflicting W1 weights" in r.getMessage()]
-    assert len(conflicts) == 11  # February through December
+    with pytest.raises(ValueError, match="Conflicting W1 weights"):
+        parse_weights_workbook(blob, CATALOG)
 
 
 def test_unmatched_row_is_reported_and_dropped(caplog: pytest.LogCaptureFixture) -> None:

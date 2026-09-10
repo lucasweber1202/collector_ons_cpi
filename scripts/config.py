@@ -26,6 +26,7 @@ CATALOG_NAME = "macrobond_inhouse"
 METADATA_TABLE = "metadata"
 TIME_SERIES_TABLE = "time_series"
 WEIGHTS_TABLE = "weights"
+ORIGINAL_WEIGHTS_TABLE = "original_weights"
 LOGS_TABLE = "logs"
 
 START_DATE_LOOKBACK_MONTHS = 5
@@ -45,7 +46,7 @@ LOG_LEVEL = os.getenv("COLLECTOR_LOG_LEVEL", "INFO")
 POLL_INTERVAL = float(os.getenv("COLLECTOR_POLL_INTERVAL", "30"))
 MAX_WAIT = float(os.getenv("COLLECTOR_MAX_WAIT", "900"))
 VALIDATION_TOLERANCE_PP = float(os.getenv("COLLECTOR_VALIDATION_TOLERANCE_PP", "0.10"))
-# Share of reconcilable checks that must actually run under --strict-validation.
+# Share of reconcilable checks that must actually run on every invocation.
 # Measured coverage on the current published workbook is 1.0000 for both checks,
 # so this floor only trips on a real regression such as a renamed Table 38 column
 # or a lost W1 row family, while tolerating a handful of unmatchable parents.

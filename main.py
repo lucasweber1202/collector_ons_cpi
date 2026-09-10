@@ -11,6 +11,8 @@ import traceback
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from sqlalchemy.engine import Engine
+
 from scripts.config import (
     DEFAULT_START_DATE,
     LOG_LEVEL,
@@ -27,20 +29,23 @@ from scripts.export_validation_xlsx import export_validation_xlsx
 from scripts.extract import (
     collect_raw_data,
     collect_weights,
+    get_original_weights,
     get_series_catalog,
     get_workbook_fingerprint,
 )
 from scripts.init_db import init_db
 from scripts.metadata import upsert_metadata
+from scripts.original_weights import upsert_original_weights
 from scripts.run_logs import insert_run_log
 from scripts.time_series import get_max_reference_date, upsert_time_series
 from scripts.validate import (
     build_hierarchy,
+    derive_operational_weights,
     log_validation_summary,
     validate_bottom_up,
     validate_weight_sums,
 )
-from scripts.weights import upsert_weights
+from scripts.weights import assert_operational_storage, upsert_weights
 
 logger = logging.getLogger("main")
 
@@ -81,10 +86,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--strict-validation",
         action="store_true",
-        help=(
-            "Fail when a configured tolerance is exceeded, when validation coverage "
-            "falls below COLLECTOR_MIN_VALIDATION_COVERAGE, or when nothing reconciled."
-        ),
+        help=("Compatibility flag: validation is now mandatory on every run."),
     )
     parser.add_argument(
         "--export-validation",
@@ -101,13 +103,13 @@ def _shift_months(value: date, months: int) -> date:
 
 
 def _anchor_to_january(value: date) -> date:
-    """Widen an extraction window back to its January price reference month.
+    """Include preceding December and January for annual chain reconciliation.
 
     Bottom-up reconciliation price-updates child weights to January of the
     reconciled year, so a window that starts after January would carry no price
     reference and silently reconcile nothing.
     """
-    return date(value.year, 1, 1)
+    return date(value.year - 1, 12, 1)
 
 
 def _wait_for_release(latest: date) -> tuple[dict[date, dict[str, float | None]], date] | None:
@@ -164,6 +166,14 @@ def main(args: argparse.Namespace) -> int:
     logger.info("Starting ONS UK CPI collector")
     _preflight()
     engine = build_engine()
+    try:
+        return _collect(args, engine)
+    finally:
+        engine.dispose()
+
+
+def _collect(args: argparse.Namespace, engine: Engine) -> int:
+    """Collect with a caller-owned database engine."""
     init_db(engine)
     latest = get_max_reference_date(engine)
 
@@ -192,29 +202,43 @@ def main(args: argparse.Namespace) -> int:
     _, failed_bottom_up, _, bottom_up_coverage, _ = log_validation_summary(
         bottom_up_checks, bottom_up_skips, "Bottom-up"
     )
-    if args.strict_validation:
-        problems = []
-        if failed_weights or failed_bottom_up:
+    problems = []
+    if failed_weights or failed_bottom_up:
+        problems.append(
+            f"tolerance breaches: weight_checks={failed_weights}, "
+            f"bottom_up_checks={failed_bottom_up}"
+        )
+    for label, checks, coverage in (
+        ("weight", weight_checks, weight_coverage),
+        ("bottom-up", bottom_up_checks, bottom_up_coverage),
+    ):
+        if not checks:
+            problems.append(f"{label} validation reconciled nothing")
+        elif coverage < MIN_VALIDATION_COVERAGE:
             problems.append(
-                f"tolerance breaches: weight_checks={failed_weights}, "
-                f"bottom_up_checks={failed_bottom_up}"
+                f"{label} coverage {coverage:.4f} below minimum {MIN_VALIDATION_COVERAGE:.4f}"
             )
-        for label, checks, coverage in (
-            ("weight", weight_checks, weight_coverage),
-            ("bottom-up", bottom_up_checks, bottom_up_coverage),
-        ):
-            if not checks:
-                problems.append(f"{label} validation reconciled nothing")
-            elif coverage < MIN_VALIDATION_COVERAGE:
-                problems.append(
-                    f"{label} coverage {coverage:.4f} below minimum {MIN_VALIDATION_COVERAGE:.4f}"
-                )
-        if problems:
-            raise ValueError("Validation failed: " + "; ".join(problems))
+    if problems:
+        raise ValueError("Validation failed: " + "; ".join(problems))
 
+    operational = derive_operational_weights(parsed, weights, hierarchy)
+    operational_checks, operational_skips = validate_bottom_up(
+        parsed, operational, hierarchy, operational=True
+    )
+    _, operational_failed, _, operational_coverage, _ = log_validation_summary(
+        operational_checks, operational_skips, "Operational bottom-up"
+    )
+    if (
+        operational_failed
+        or not operational_checks
+        or operational_coverage < MIN_VALIDATION_COVERAGE
+    ):
+        raise ValueError("Validation failed: operational weights do not reconcile")
     collected_at = datetime.now(UTC)
+    assert_operational_storage(engine)
     new_obs, new_vintages = upsert_time_series(engine, parsed, collected_at)
-    new_weights, weight_vintages = upsert_weights(engine, weights, collected_at)
+    upsert_original_weights(engine, get_original_weights(), collected_at)
+    new_weights, weight_vintages = upsert_weights(engine, operational, collected_at)
     metadata_inserted, metadata_updated = upsert_metadata(engine, parsed, collected_at)
     logger.info(
         "Run result: observations=%d vintages=%d weights=%d weight_vintages=%d "
@@ -229,17 +253,19 @@ def main(args: argparse.Namespace) -> int:
     if args.export_validation:
         output = export_validation_xlsx(
             parsed,
-            weights,
+            operational,
             hierarchy,
-            weight_checks + bottom_up_checks,
+            weight_checks + bottom_up_checks + operational_checks,
             Path(ROOT_DIR) / "_verify_xls" / "ons_cpi_validation.xlsx",
+            original_weights=get_original_weights(),
         )
         logger.info("Wrote validation workbook to %s", output)
     return 0
 
 
-if __name__ == "__main__":
-    arguments = _parse_args(sys.argv[1:])
+def run(argv: list[str] | None = None) -> int:
+    """Run the pipeline and always attempt a separate durable execution log."""
+    arguments = _parse_args(argv)
     log_buffer = _setup_logging(arguments.log_level)
     started_at = datetime.now(UTC)
     status = "success"
@@ -254,6 +280,7 @@ if __name__ == "__main__":
         return_code = 1
     finally:
         finished_at = datetime.now(UTC)
+        log_engine = None
         try:
             log_engine = build_engine()
             init_db(log_engine)
@@ -267,5 +294,12 @@ if __name__ == "__main__":
             )
         except Exception:
             logger.exception("Could not persist run log")
-    if return_code != 0:
-        raise SystemExit(return_code)
+            return_code = 1
+        finally:
+            if log_engine is not None:
+                log_engine.dispose()
+    return return_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(run(sys.argv[1:]))

@@ -45,9 +45,9 @@ def _ons_parent(
     weight_rising, weight_flat = weights
     total = weight_rising + weight_flat
     parent: dict[date, float] = {}
-    for month in rising:
+    for month, rising_level in rising.items():
         relative = (
-            weight_rising * rising[month] / rising[reference]
+            weight_rising * rising_level / rising[reference]
             + weight_flat * flat[month] / flat[reference]
         ) / total
         parent[month] = parent_at_reference * relative

@@ -69,6 +69,19 @@ CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.{LOGS_TABLE} (
 )
 """
 
+# UK-only, user-approved: retain monthly regimes and publication vintages.
+CREATE_ORIGINAL_WEIGHTS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.original_weights (
+    series_id VARCHAR(200) NOT NULL,
+    reference_date DATE NOT NULL,
+    vintage_date DATE NOT NULL,
+    weight {{double}} NOT NULL,
+    weight_base_year INTEGER NOT NULL,
+    collected_at TIMESTAMP NOT NULL,
+    CONSTRAINT pk_original_weights PRIMARY KEY (series_id, reference_date, vintage_date)
+)
+"""
+
 
 def double_type(dialect: str) -> str:
     """Return the 64-bit float spelling this SQL dialect accepts."""
@@ -84,6 +97,7 @@ def init_db(engine: Engine) -> None:
             CREATE_METADATA_TABLE,
             CREATE_TIME_SERIES_TABLE.format(double=double),
             CREATE_WEIGHTS_TABLE.format(double=double),
+            CREATE_ORIGINAL_WEIGHTS_TABLE.format(double=double),
             CREATE_LOGS_TABLE,
         ):
             conn.execute(text(statement))
