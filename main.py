@@ -24,7 +24,12 @@ from scripts.config import (
 )
 from scripts.db import build_engine
 from scripts.export_validation_xlsx import export_validation_xlsx
-from scripts.extract import collect_raw_data, collect_weights, get_series_catalog
+from scripts.extract import (
+    collect_raw_data,
+    collect_weights,
+    get_series_catalog,
+    get_workbook_fingerprint,
+)
 from scripts.init_db import init_db
 from scripts.metadata import upsert_metadata
 from scripts.run_logs import insert_run_log
@@ -107,11 +112,22 @@ def _wait_for_release(latest: date) -> tuple[dict[date, dict[str, float | None]]
     expected = _shift_months(latest.replace(day=1), 1)
     validation_start = _anchor_to_january(_shift_months(expected, -1))
     deadline = time.monotonic() + MAX_WAIT
+    fingerprint: str | None = None
+    downloaded = False
     while True:
-        parsed = collect_raw_data(validation_start)
-        if parsed and max(parsed) >= expected:
-            logger.info("Detected ONS CPI release for %s", expected)
-            return parsed, validation_start
+        current = get_workbook_fingerprint()
+        # Re-download only when the workbook actually changed. A source that
+        # publishes no validator reports None and is always re-downloaded, so a
+        # release is never missed to save a request.
+        if not downloaded or current is None or current != fingerprint:
+            parsed = collect_raw_data(validation_start)
+            fingerprint = current
+            downloaded = True
+            if parsed and max(parsed) >= expected:
+                logger.info("Detected ONS CPI release for %s", expected)
+                return parsed, validation_start
+        else:
+            logger.info("CPI workbook unchanged since the last check")
         if time.monotonic() >= deadline:
             logger.info("No CPI release for %s before timeout; exiting normally", expected)
             return None

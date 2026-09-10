@@ -121,14 +121,14 @@ def _build_client() -> httpx.Client:
     )
 
 
-def _http_get(client: httpx.Client, url: str) -> httpx.Response:
-    """GET an allowlisted ONS URL with bounded exponential-backoff retries."""
+def _http_get(client: httpx.Client, url: str, method: str = "GET") -> httpx.Response:
+    """Request an allowlisted ONS URL with bounded exponential-backoff retries."""
     if urlparse(url).hostname not in ALLOWED_HOSTS:
         raise ValueError(f"Refusing non-ONS URL: {url}")
     last_error: Exception | None = None
     for attempt in range(MAX_RETRIES + 1):
         try:
-            response = client.get(url)
+            response = client.request(method, url)
             if response.status_code not in {429, 500, 502, 503, 504}:
                 response.raise_for_status()
                 return response
@@ -406,6 +406,19 @@ def parse_weights_workbook(
         conflicts,
     )
     return parsed
+
+
+def get_workbook_fingerprint() -> str | None:
+    """Return the CPI workbook's current entity tag without downloading its body.
+
+    Release polling compares this between attempts, so an unchanged workbook
+    costs one header request instead of a full download and parse. Returns
+    ``None`` when the source exposes no validator, which makes the caller fall
+    back to downloading rather than risk missing a release.
+    """
+    with _build_client() as client:
+        response = _http_get(client, CPI_DOWNLOAD_URL, method="HEAD")
+    return response.headers.get("etag")
 
 
 def collect_raw_data(start_date: date | None = None) -> dict[date, dict[str, float | None]]:
