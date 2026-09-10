@@ -8,6 +8,16 @@ from sqlalchemy.engine import Engine
 from scripts.config import LOGS_TABLE, METADATA_TABLE, SCHEMA_NAME, TIME_SERIES_TABLE, WEIGHTS_TABLE
 from scripts.db import build_engine
 
+# PostgreSQL and Databricks SQL share no spelling for a 64-bit float. Spark's
+# parser lists DOUBLE as the only alias for DoubleType, so Databricks rejects
+# DOUBLE PRECISION; PostgreSQL has no DOUBLE and rejects it in turn. FLOAT is
+# not a way out: PostgreSQL resolves a bare FLOAT to 8-byte float8 while
+# Databricks resolves it to 4-byte FloatType, which would silently halve stored
+# precision instead of failing loudly. The spelling is therefore selected per
+# dialect, the same way scripts/metadata.py selects MERGE.
+DOUBLE_TYPES = {"postgresql": "DOUBLE PRECISION"}
+DEFAULT_DOUBLE_TYPE = "DOUBLE"
+
 CREATE_SCHEMA = f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}"
 CREATE_METADATA_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.{METADATA_TABLE} (
@@ -32,7 +42,7 @@ CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.{TIME_SERIES_TABLE} (
     series_id VARCHAR(200) NOT NULL,
     reference_date DATE NOT NULL,
     vintage_date DATE NOT NULL,
-    value DOUBLE NOT NULL,
+    value {{double}} NOT NULL,
     collected_at TIMESTAMP NOT NULL,
     CONSTRAINT pk_time_series PRIMARY KEY (series_id, reference_date, vintage_date)
 )
@@ -42,7 +52,7 @@ CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.{WEIGHTS_TABLE} (
     series_id VARCHAR(200) NOT NULL,
     reference_date DATE NOT NULL,
     vintage_date DATE NOT NULL,
-    weight DOUBLE NOT NULL,
+    weight {{double}} NOT NULL,
     collected_at TIMESTAMP NOT NULL,
     CONSTRAINT pk_weights PRIMARY KEY (series_id, reference_date, vintage_date)
 )
@@ -60,14 +70,20 @@ CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.{LOGS_TABLE} (
 """
 
 
+def double_type(dialect: str) -> str:
+    """Return the 64-bit float spelling this SQL dialect accepts."""
+    return DOUBLE_TYPES.get(dialect, DEFAULT_DOUBLE_TYPE)
+
+
 def init_db(engine: Engine) -> None:
     """Create all database objects idempotently."""
+    double = double_type(engine.dialect.name)
     with engine.begin() as conn:
         for statement in (
             CREATE_SCHEMA,
             CREATE_METADATA_TABLE,
-            CREATE_TIME_SERIES_TABLE,
-            CREATE_WEIGHTS_TABLE,
+            CREATE_TIME_SERIES_TABLE.format(double=double),
+            CREATE_WEIGHTS_TABLE.format(double=double),
             CREATE_LOGS_TABLE,
         ):
             conn.execute(text(statement))
