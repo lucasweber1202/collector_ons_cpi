@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date
 
 import pytest
@@ -45,11 +46,15 @@ def test_hierarchy_and_bottom_up_exact_case() -> None:
         date(2026, 2, 1): {all_items: 102.5, first: 110.0, second: 100.0},
     }
     weights = {date(2026, 2, 1): {all_items: 1000.0, first: 250.0, second: 750.0}}
-    weight_results = validate_weight_sums(weights, hierarchy)
-    bottom_results = validate_bottom_up(observations, weights, hierarchy, tolerance_pp=1e-12)
+    weight_results, weight_skips = validate_weight_sums(weights, hierarchy)
+    bottom_results, bottom_skips = validate_bottom_up(
+        observations, weights, hierarchy, tolerance_pp=1e-12
+    )
     assert weight_results[0]["passed"] is True
     assert bottom_results[0]["passed"] is True
     assert bottom_results[0]["residual"] == pytest.approx(0.0, abs=1e-12)
+    assert weight_skips == Counter()
+    assert bottom_skips == Counter()
 
 
 def test_bottom_up_flags_material_mismatch() -> None:
@@ -61,8 +66,9 @@ def test_bottom_up_flags_material_mismatch() -> None:
         date(2026, 2, 1): {all_items: 110.0, first: 100.0, second: 100.0},
     }
     weights = {date(2026, 2, 1): {all_items: 1000.0, first: 500.0, second: 500.0}}
-    result = validate_bottom_up(
+    results, _ = validate_bottom_up(
         observations, weights, build_hierarchy([all_items, first, second]), tolerance_pp=0.1
-    )[0]
+    )
+    result = results[0]
     assert result["passed"] is False
     assert result["residual"] == pytest.approx(-10.0)

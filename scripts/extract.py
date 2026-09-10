@@ -311,12 +311,22 @@ def parse_weights_workbook(
     }
     parsed: dict[date, dict[str, float]] = {}
     matched: set[str] = set()
+    unmatched = 0
     for row in range(5, len(frame.index)):
         label = _weight_code_name(frame.iat[row, 2])
         if label is None:
             continue
         series_id = _match_weight_series(label[0], label[1], catalog)
         if series_id is None:
+            # An official weight we cannot attribute is a reconciliation gap, not
+            # noise: report it instead of dropping the row silently.
+            unmatched += 1
+            logger.warning(
+                "W1 row %d matched no Table 38 series: code=%s name=%s",
+                row,
+                label[0],
+                label[1],
+            )
             continue
         matched.add(series_id)
         for column, header in headers.items():
@@ -338,10 +348,11 @@ def parse_weights_workbook(
     if not parsed:
         raise ValueError("W1-CPI contained no usable weights")
     logger.info(
-        "Parsed weights for %d/%d CPI series across %d months",
+        "Parsed weights for %d/%d CPI series across %d months (%d W1 rows unmatched)",
         len(matched),
         len(catalog),
         len(parsed),
+        unmatched,
     )
     return parsed
 

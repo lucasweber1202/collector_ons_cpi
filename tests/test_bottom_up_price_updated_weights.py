@@ -8,6 +8,7 @@ non-zero residual here is an implementation defect, not source methodology.
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date
 
 import pytest
@@ -92,12 +93,14 @@ def test_bottom_up_reconciles_ons_constructed_parent(
     rising = _child_levels(2026, january_rising, 1.03)
     flat = _child_levels(2026, january_flat, 1.0)
     parent = _ons_parent(rising, flat, date(2026, 1, 1), 100.0, (WEIGHT_RISING, WEIGHT_FLAT))
-    results = validate_bottom_up(
+    results, skips = validate_bottom_up(
         _observations(rising, flat, parent),
         _annual_weights(2026, range(1, 13)),
         HIERARCHY,
         tolerance_pp=EXACT,
     )
+
+    assert skips == Counter()
 
     assert len(results) == 11  # February through December
     for row in results:
@@ -131,9 +134,11 @@ def test_bottom_up_reconciles_december_to_january_chain_link() -> None:
         CHILD_FLAT: january_flat_weight,
     }
 
-    results = validate_bottom_up(
+    results, skips = validate_bottom_up(
         _observations(rising, flat, parent), weights, HIERARCHY, tolerance_pp=EXACT
     )
+
+    assert skips == Counter()
 
     january = next(row for row in results if row["reference_date"] == next_january)
     assert january["residual"] == pytest.approx(0.0, abs=EXACT)
