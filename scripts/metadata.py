@@ -6,8 +6,8 @@ import logging
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import text
-from sqlalchemy.engine import Engine
+from sqlalchemy import TextClause, text
+from sqlalchemy.engine import Connection, Engine
 
 from scripts.config import METADATA_TABLE, SCHEMA_NAME
 from scripts.extract import (
@@ -23,6 +23,7 @@ from scripts.time_series import get_series_aggregates
 
 logger = logging.getLogger(__name__)
 _TABLE = f"{SCHEMA_NAME}.{METADATA_TABLE}"
+BATCH_SIZE = 500
 _COMPARABLE_COLUMNS = (
     "name",
     "description",
@@ -36,6 +37,69 @@ _COMPARABLE_COLUMNS = (
     "source_url",
     "last_publish_date",
 )
+_COLUMNS = ("series_id", *_COMPARABLE_COLUMNS, "collected_at")
+_UPDATE_COLUMNS = tuple(column for column in _COLUMNS if column != "series_id")
+# See scripts/time_series.py: MERGE keeps a batch of changed rows in one
+# statement; the fallback is only reached by the SQLite engine used in tests.
+_MERGE_DIALECTS = frozenset({"databricks", "postgresql"})
+
+
+def _batch_parameters(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Flatten a batch into named parameters suffixed by row position."""
+    return {
+        f"{column}_{index}": row[column] for index, row in enumerate(rows) for column in _COLUMNS
+    }
+
+
+def _insert_statement(count: int) -> TextClause:
+    """Build one multi-row INSERT covering ``count`` rows."""
+    values = ", ".join(
+        "(" + ", ".join(f":{column}_{index}" for column in _COLUMNS) + ")" for index in range(count)
+    )
+    return text(f"INSERT INTO {_TABLE} ({', '.join(_COLUMNS)}) VALUES {values}")
+
+
+def _merge_statement(count: int) -> TextClause:
+    """Build one Databricks-compatible MERGE covering ``count`` rows."""
+    source = " UNION ALL ".join(
+        "SELECT " + ", ".join(f":{column}_{index} AS {column}" for column in _COLUMNS)
+        for index in range(count)
+    )
+    assignments = ", ".join(f"{column} = source.{column}" for column in _UPDATE_COLUMNS)
+    return text(
+        f"MERGE INTO {_TABLE} AS target USING ({source}) AS source "
+        "ON target.series_id = source.series_id "
+        f"WHEN MATCHED THEN UPDATE SET {assignments}"
+    )
+
+
+_UPDATE_SQL = text(
+    f"UPDATE {_TABLE} SET {', '.join(f'{column}=:{column}' for column in _UPDATE_COLUMNS)} "
+    "WHERE series_id=:series_id"
+)
+
+
+def _write_batches(
+    conn: Connection, rows: list[dict[str, Any]], operation: str, merge: bool
+) -> None:
+    """Apply rows in bounded statements, logging INFO progress per batch."""
+    if not rows:
+        return
+    logger.info("Metadata %s: writing %d rows in batches of %d", operation, len(rows), BATCH_SIZE)
+    for start in range(0, len(rows), BATCH_SIZE):
+        batch = rows[start : start + BATCH_SIZE]
+        if merge:
+            conn.execute(_merge_statement(len(batch)), _batch_parameters(batch))
+        elif operation == "insert":
+            conn.execute(_insert_statement(len(batch)), _batch_parameters(batch))
+        else:
+            conn.execute(_UPDATE_SQL, batch)
+        logger.info(
+            "Metadata %s progress: %d/%d rows",
+            operation,
+            min(start + BATCH_SIZE, len(rows)),
+            len(rows),
+        )
 
 
 def _as_date(value: Any) -> date | None:
@@ -104,6 +168,7 @@ def upsert_metadata(
     """Insert new metadata and update only genuinely changed rows."""
     collected_at = collected_at or datetime.now(UTC)
     desired = build_metadata_rows(parsed_by_date, get_series_aggregates(engine), collected_at)
+    logger.info("Metadata upsert: evaluating %d series", len(desired))
     with engine.connect() as conn:
         current_rows = conn.execute(text(f"SELECT * FROM {_TABLE}")).mappings().all()
     current = {str(row["series_id"]): dict(row) for row in current_rows}
@@ -120,34 +185,9 @@ def upsert_metadata(
             for column in _COMPARABLE_COLUMNS
         ):
             updates.append(row)
-    columns = (
-        "series_id",
-        "name",
-        "description",
-        "country",
-        "frequency",
-        "unit",
-        "first_observation",
-        "last_observation",
-        "observation_count",
-        "eco_group",
-        "source_url",
-        "last_publish_date",
-        "collected_at",
-    )
-    insert_sql = text(
-        f"INSERT INTO {_TABLE} ({', '.join(columns)}) VALUES "
-        f"({', '.join(':' + column for column in columns)})"
-    )
-    update_columns = tuple(column for column in columns if column != "series_id")
-    update_sql = text(
-        f"UPDATE {_TABLE} SET {', '.join(column + '=:' + column for column in update_columns)} "
-        "WHERE series_id=:series_id"
-    )
     with engine.begin() as conn:
-        if inserts:
-            conn.execute(insert_sql, inserts)
-        if updates:
-            conn.execute(update_sql, updates)
+        merge = conn.dialect.name in _MERGE_DIALECTS
+        _write_batches(conn, inserts, "insert", merge=False)
+        _write_batches(conn, updates, "update", merge=merge)
     logger.info("Metadata upsert: inserted=%d updated=%d", len(inserts), len(updates))
     return len(inserts), len(updates)

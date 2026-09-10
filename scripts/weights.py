@@ -7,8 +7,8 @@ import math
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import text
-from sqlalchemy.engine import Engine
+from sqlalchemy import TextClause, text
+from sqlalchemy.engine import Connection, Engine
 
 from scripts.config import SCHEMA_NAME, WEIGHTS_TABLE
 
@@ -16,6 +16,71 @@ logger = logging.getLogger(__name__)
 _TABLE = f"{SCHEMA_NAME}.{WEIGHTS_TABLE}"
 BATCH_SIZE = 500
 ROUND_DECIMALS = 10
+
+_COLUMNS = ("series_id", "reference_date", "vintage_date", "weight", "collected_at")
+_KEY_COLUMNS = ("series_id", "reference_date", "vintage_date")
+_UPDATE_COLUMNS = ("weight", "collected_at")
+# See scripts/time_series.py: MERGE keeps a batch of same-day revisions in one
+# statement; the fallback is only reached by the SQLite engine used in tests.
+_MERGE_DIALECTS = frozenset({"databricks", "postgresql"})
+
+
+def _batch_parameters(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Flatten a batch into named parameters suffixed by row position."""
+    return {
+        f"{column}_{index}": row[column] for index, row in enumerate(rows) for column in _COLUMNS
+    }
+
+
+def _insert_statement(count: int) -> TextClause:
+    """Build one multi-row INSERT covering ``count`` rows."""
+    values = ", ".join(
+        "(" + ", ".join(f":{column}_{index}" for column in _COLUMNS) + ")" for index in range(count)
+    )
+    return text(f"INSERT INTO {_TABLE} ({', '.join(_COLUMNS)}) VALUES {values}")
+
+
+def _merge_statement(count: int) -> TextClause:
+    """Build one Databricks-compatible MERGE covering ``count`` rows."""
+    source = " UNION ALL ".join(
+        "SELECT " + ", ".join(f":{column}_{index} AS {column}" for column in _COLUMNS)
+        for index in range(count)
+    )
+    condition = " AND ".join(f"target.{column} = source.{column}" for column in _KEY_COLUMNS)
+    assignments = ", ".join(f"{column} = source.{column}" for column in _UPDATE_COLUMNS)
+    return text(
+        f"MERGE INTO {_TABLE} AS target USING ({source}) AS source ON {condition} "
+        f"WHEN MATCHED THEN UPDATE SET {assignments}"
+    )
+
+
+_UPDATE_SQL = text(
+    f"UPDATE {_TABLE} SET {', '.join(f'{column}=:{column}' for column in _UPDATE_COLUMNS)} "
+    f"WHERE {' AND '.join(f'{column}=:{column}' for column in _KEY_COLUMNS)}"
+)
+
+
+def _write_batches(
+    conn: Connection, rows: list[dict[str, Any]], operation: str, merge: bool
+) -> None:
+    """Apply rows in bounded statements, logging INFO progress per batch."""
+    if not rows:
+        return
+    logger.info("Weights %s: writing %d rows in batches of %d", operation, len(rows), BATCH_SIZE)
+    for start in range(0, len(rows), BATCH_SIZE):
+        batch = rows[start : start + BATCH_SIZE]
+        if merge:
+            conn.execute(_merge_statement(len(batch)), _batch_parameters(batch))
+        elif operation == "insert":
+            conn.execute(_insert_statement(len(batch)), _batch_parameters(batch))
+        else:
+            conn.execute(_UPDATE_SQL, batch)
+        logger.info(
+            "Weights %s progress: %d/%d rows",
+            operation,
+            min(start + BATCH_SIZE, len(rows)),
+            len(rows),
+        )
 
 
 def _latest(engine: Engine, minimum_date: date) -> dict[tuple[str, date], dict[str, Any]]:
@@ -60,6 +125,7 @@ def upsert_weights(
                         "collected_at": collected_at,
                     }
                 )
+    logger.info("Weights upsert: evaluating %d incoming weights", len(incoming))
     if not incoming:
         logger.info("No weight rows to upsert")
         return 0, 0
@@ -87,19 +153,10 @@ def upsert_weights(
         else:
             inserts.append({**row, "vintage_date": today})
             new_vintages += 1
-    insert_sql = text(
-        f"INSERT INTO {_TABLE} (series_id, reference_date, vintage_date, weight, collected_at) "
-        "VALUES (:series_id, :reference_date, :vintage_date, :weight, :collected_at)"
-    )
-    update_sql = text(
-        f"UPDATE {_TABLE} SET weight=:weight, collected_at=:collected_at "
-        "WHERE series_id=:series_id AND reference_date=:reference_date AND vintage_date=:vintage_date"
-    )
     with engine.begin() as conn:
-        for start in range(0, len(inserts), BATCH_SIZE):
-            conn.execute(insert_sql, inserts[start : start + BATCH_SIZE])
-        for start in range(0, len(updates), BATCH_SIZE):
-            conn.execute(update_sql, updates[start : start + BATCH_SIZE])
+        merge = conn.dialect.name in _MERGE_DIALECTS
+        _write_batches(conn, inserts, "insert", merge=False)
+        _write_batches(conn, updates, "same-day update", merge=merge)
     logger.info(
         "Weights upsert: new=%d new_vintages=%d same_day_updates=%d",
         new_rows,
