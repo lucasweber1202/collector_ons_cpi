@@ -89,10 +89,20 @@ def _shift_months(value: date, months: int) -> date:
     return date(ordinal // 12, ordinal % 12 + 1, 1)
 
 
+def _anchor_to_january(value: date) -> date:
+    """Widen an extraction window back to its January price reference month.
+
+    Bottom-up reconciliation price-updates child weights to January of the
+    reconciled year, so a window that starts after January would carry no price
+    reference and silently reconcile nothing.
+    """
+    return date(value.year, 1, 1)
+
+
 def _wait_for_release(latest: date) -> tuple[dict[date, dict[str, float | None]], date] | None:
     """Poll until the month after ``latest`` appears or timeout expires."""
     expected = _shift_months(latest.replace(day=1), 1)
-    validation_start = _shift_months(expected, -1)
+    validation_start = _anchor_to_january(_shift_months(expected, -1))
     deadline = time.monotonic() + MAX_WAIT
     while True:
         parsed = collect_raw_data(validation_start)
@@ -109,8 +119,8 @@ def _wait_for_release(latest: date) -> tuple[dict[date, dict[str, float | None]]
 
 
 def _rewind_start(latest: date) -> date:
-    """Return the standard revision lookback month."""
-    return _shift_months(latest.replace(day=1), -START_DATE_LOOKBACK_MONTHS)
+    """Return the standard revision lookback month, anchored to its January."""
+    return _anchor_to_january(_shift_months(latest.replace(day=1), -START_DATE_LOOKBACK_MONTHS))
 
 
 def main(args: argparse.Namespace) -> int:
@@ -121,7 +131,7 @@ def main(args: argparse.Namespace) -> int:
     latest = get_max_reference_date(engine)
 
     if args.start_date is not None:
-        extraction_start = args.start_date.replace(day=1)
+        extraction_start = _anchor_to_january(args.start_date.replace(day=1))
         parsed = collect_raw_data(extraction_start)
     elif latest is None:
         extraction_start = DEFAULT_START_DATE

@@ -76,19 +76,39 @@ def validate_weight_sums(
     return results
 
 
+def price_reference_month(ref_date: date) -> date:
+    """Return the ONS price reference month backing the link ending in ``ref_date``.
+
+    ONS aggregates with a Laspeyres-type index against an annual January price
+    reference and chains the series in December, so February through December
+    compare against January of the same year while January itself chains on the
+    preceding December.
+    """
+    if ref_date.month == 1:
+        return date(ref_date.year - 1, 12, 1)
+    return date(ref_date.year, 1, 1)
+
+
 def validate_bottom_up(
     observations: dict[date, dict[str, float | None]],
     weights_by_date: dict[date, dict[str, float]],
     hierarchy: dict[str, list[str]],
     tolerance_pp: float = VALIDATION_TOLERANCE_PP,
 ) -> list[dict[str, Any]]:
-    """Reconstruct monthly parent inflation from weighted child price relatives.
+    """Reconstruct monthly parent inflation from price-updated child weights.
 
-    Official basket weights remain untouched in storage. For each parent/month,
-    this check normalizes the available immediate-child weights locally, takes
-    their weighted average price relative, and compares it with the published
-    parent price relative. January automatically uses the ONS January regime;
-    February through December use the second annual regime.
+    Official basket weights remain untouched in storage. For each parent/month
+    this check price-updates the immediate-child weights to the ONS price
+    reference month, normalizes them locally, takes their weighted average price
+    relative, and compares it with the published parent price relative:
+
+        phi_i(t)   = w_i(t) * I_i(t-1)/I_i(ref) /
+                     sum_j w_j(t) * I_j(t-1)/I_j(ref)
+        R_hat(p,t) = sum_i phi_i(t) * I_i(t)/I_i(t-1)
+
+    Omitting the ``I_i(ref)`` term is only valid when every child shares one
+    January index level. Table 38 publishes 2015=100 levels that are never
+    re-referenced to January, so dropping it biases the residual within the year.
     """
     dates = sorted(observations)
     results: list[dict[str, Any]] = []
@@ -102,6 +122,8 @@ def validate_bottom_up(
         weights = weights_by_date.get(ref_date)
         if not weights:
             continue
+        reference_date = price_reference_month(ref_date)
+        reference = observations.get(reference_date, {})
         for parent, children in hierarchy.items():
             parent_now = current.get(parent)
             parent_before = previous.get(parent)
@@ -113,15 +135,20 @@ def validate_bottom_up(
                 if child in weights
                 and current.get(child) is not None
                 and previous.get(child) not in (None, 0)
+                and reference.get(child) not in (None, 0)
             ]
             if len(usable) != len(children):
                 continue
-            weight_total = sum(weights[child] for child in usable)
+            updated = {
+                child: weights[child] * float(previous[child]) / float(reference[child])
+                for child in usable
+            }
+            weight_total = sum(updated.values())
             if weight_total == 0:
                 continue
             reconstructed_relative = (
                 sum(
-                    weights[child] * float(current[child]) / float(previous[child])
+                    updated[child] * float(current[child]) / float(previous[child])
                     for child in usable
                 )
                 / weight_total
@@ -132,6 +159,7 @@ def validate_bottom_up(
                 {
                     "check": "bottom_up_monthly_rate",
                     "reference_date": ref_date,
+                    "price_reference_date": reference_date,
                     "parent_series_id": parent,
                     "published": (published_relative - 1.0) * 100.0,
                     "reconstructed": (reconstructed_relative - 1.0) * 100.0,
