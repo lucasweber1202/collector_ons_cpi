@@ -81,7 +81,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--strict-validation",
         action="store_true",
-        help="Fail when any configured bottom-up tolerance is exceeded.",
+        help=(
+            "Fail when a configured tolerance is exceeded, when validation coverage "
+            "falls below COLLECTOR_MIN_VALIDATION_COVERAGE, or when nothing reconciled."
+        ),
     )
     parser.add_argument(
         "--export-validation",
