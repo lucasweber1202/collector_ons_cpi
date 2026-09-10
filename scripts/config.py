@@ -55,3 +55,23 @@ DBX_SERVER_HOSTNAME = os.getenv("DBX_SERVER_HOSTNAME", "")
 DBX_HTTP_PATH = os.getenv("DBX_HTTP_PATH", "")
 AKV_VAULT_URL = os.getenv("AKV_VAULT_URL", "")
 AKV_SECRET_NAME = os.getenv("AKV_SECRET_NAME", "databricks-token")
+
+
+def missing_environment(prod: bool = PROD) -> list[str]:
+    """Return every required environment variable that is unset, not just the first.
+
+    Reported before any database or HTTP work so one run surfaces the complete
+    list. The Databricks token is deliberately absent: it may also come from a
+    notebook/job context, so its absence is a warning rather than a hard failure.
+    """
+    if not prod:
+        return [] if DATABASE_URL else ["COLLECTOR_DB_URL"]
+    required = {"DBX_SERVER_HOSTNAME": DBX_SERVER_HOSTNAME, "DBX_HTTP_PATH": DBX_HTTP_PATH}
+    return sorted(name for name, value in required.items() if not value)
+
+
+def unresolved_credentials(prod: bool = PROD) -> list[str]:
+    """Return credential sources that are unset but may still resolve at runtime."""
+    if prod and not os.getenv("DATABRICKS_TOKEN") and not AKV_VAULT_URL:
+        return ["DATABRICKS_TOKEN", "AKV_VAULT_URL"]
+    return []

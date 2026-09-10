@@ -19,6 +19,8 @@ from scripts.config import (
     POLL_INTERVAL,
     ROOT_DIR,
     START_DATE_LOOKBACK_MONTHS,
+    missing_environment,
+    unresolved_credentials,
 )
 from scripts.db import build_engine
 from scripts.export_validation_xlsx import export_validation_xlsx
@@ -124,9 +126,24 @@ def _rewind_start(latest: date) -> date:
     return _anchor_to_january(_shift_months(latest.replace(day=1), -START_DATE_LOOKBACK_MONTHS))
 
 
+def _preflight() -> None:
+    """Fail before any database or HTTP work if the environment is incomplete."""
+    missing = missing_environment()
+    if missing:
+        raise RuntimeError("Missing required environment variables: " + ", ".join(missing))
+    deferred = unresolved_credentials()
+    if deferred:
+        logger.warning(
+            "No %s set; the Databricks token must come from the notebook/job context",
+            " or ".join(deferred),
+        )
+    logger.info("Environment preflight passed")
+
+
 def main(args: argparse.Namespace) -> int:
     """Run extraction, validation, weights, time series, then metadata."""
     logger.info("Starting ONS UK CPI collector")
+    _preflight()
     engine = build_engine()
     init_db(engine)
     latest = get_max_reference_date(engine)
