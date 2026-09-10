@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from datetime import date
 from itertools import pairwise
 from typing import Any
@@ -11,6 +12,17 @@ from scripts.config import VALIDATION_TOLERANCE_PP
 from scripts.extract import parse_series_id
 
 logger = logging.getLogger(__name__)
+
+# W1 only publishes weights from 2008, so earlier months are not reconcilable at
+# source. They are reported separately and excluded from the coverage
+# denominator; every other skip reason means a check that should have run.
+SKIP_OUTSIDE_WEIGHTS_WINDOW = "month outside published weights window"
+SKIP_PARENT_WITHOUT_WEIGHT = "parent series has no weight"
+SKIP_CHILD_WITHOUT_WEIGHT = "child series has no weight"
+SKIP_PARENT_WITHOUT_OBSERVATION = "parent series has no usable observation"
+SKIP_CHILD_WITHOUT_OBSERVATION = "child series has no usable observation"
+SKIP_PRICE_REFERENCE_MISSING = "price reference month not extracted"
+SKIP_ZERO_WEIGHT_TOTAL = "price-updated child weights sum to zero"
 
 
 def _parent_node(node: str) -> str | None:
@@ -51,12 +63,22 @@ def validate_weight_sums(
     weights_by_date: dict[date, dict[str, float]],
     hierarchy: dict[str, list[str]],
     tolerance: float = 0.01,
-) -> list[dict[str, Any]]:
-    """Check that immediate child basket weights sum to each parent weight."""
+) -> tuple[list[dict[str, Any]], Counter[str]]:
+    """Check that immediate child basket weights sum to each parent weight.
+
+    Returns the performed checks and a count of skipped checks by reason, so a
+    run that reconciles nothing cannot be mistaken for a run that reconciles
+    everything.
+    """
     results: list[dict[str, Any]] = []
+    skips: Counter[str] = Counter()
     for ref_date, weights in sorted(weights_by_date.items()):
         for parent, children in hierarchy.items():
-            if parent not in weights or any(child not in weights for child in children):
+            if parent not in weights:
+                skips[SKIP_PARENT_WITHOUT_WEIGHT] += 1
+                continue
+            if any(child not in weights for child in children):
+                skips[SKIP_CHILD_WITHOUT_WEIGHT] += 1
                 continue
             parent_weight = weights[parent]
             child_sum = sum(weights[child] for child in children)
@@ -73,7 +95,20 @@ def validate_weight_sums(
                     "child_count": len(children),
                 }
             )
-    return results
+    return results, skips
+
+
+def price_reference_month(ref_date: date) -> date:
+    """Return the ONS price reference month backing the link ending in ``ref_date``.
+
+    ONS aggregates with a Laspeyres-type index against an annual January price
+    reference and chains the series in December, so February through December
+    compare against January of the same year while January itself chains on the
+    preceding December.
+    """
+    if ref_date.month == 1:
+        return date(ref_date.year - 1, 12, 1)
+    return date(ref_date.year, 1, 1)
 
 
 def validate_bottom_up(
@@ -81,17 +116,29 @@ def validate_bottom_up(
     weights_by_date: dict[date, dict[str, float]],
     hierarchy: dict[str, list[str]],
     tolerance_pp: float = VALIDATION_TOLERANCE_PP,
-) -> list[dict[str, Any]]:
-    """Reconstruct monthly parent inflation from weighted child price relatives.
+) -> tuple[list[dict[str, Any]], Counter[str]]:
+    """Reconstruct monthly parent inflation from price-updated child weights.
 
-    Official basket weights remain untouched in storage. For each parent/month,
-    this check normalizes the available immediate-child weights locally, takes
-    their weighted average price relative, and compares it with the published
-    parent price relative. January automatically uses the ONS January regime;
-    February through December use the second annual regime.
+    Official basket weights remain untouched in storage. For each parent/month
+    this check price-updates the immediate-child weights to the ONS price
+    reference month, normalizes them locally, takes their weighted average price
+    relative, and compares it with the published parent price relative:
+
+        phi_i(t)   = w_i(t) * I_i(t-1)/I_i(ref) /
+                     sum_j w_j(t) * I_j(t-1)/I_j(ref)
+        R_hat(p,t) = sum_i phi_i(t) * I_i(t)/I_i(t-1)
+
+    Omitting the ``I_i(ref)`` term is only valid when every child shares one
+    January index level. Table 38 publishes 2015=100 levels that are never
+    re-referenced to January, so dropping it biases the residual within the year.
+
+    Returns the performed checks and a count of skipped checks by reason, so a
+    run that reconciles nothing cannot be mistaken for a run that reconciles
+    everything.
     """
     dates = sorted(observations)
     results: list[dict[str, Any]] = []
+    skips: Counter[str] = Counter()
     for previous_date, ref_date in pairwise(dates):
         if (ref_date.year * 12 + ref_date.month) - (
             previous_date.year * 12 + previous_date.month
@@ -101,11 +148,15 @@ def validate_bottom_up(
         previous = observations[previous_date]
         weights = weights_by_date.get(ref_date)
         if not weights:
+            skips[SKIP_OUTSIDE_WEIGHTS_WINDOW] += len(hierarchy)
             continue
+        reference_date = price_reference_month(ref_date)
+        reference = observations.get(reference_date, {})
         for parent, children in hierarchy.items():
             parent_now = current.get(parent)
             parent_before = previous.get(parent)
             if parent_now is None or parent_before in (None, 0):
+                skips[SKIP_PARENT_WITHOUT_OBSERVATION] += 1
                 continue
             usable = [
                 child
@@ -113,15 +164,27 @@ def validate_bottom_up(
                 if child in weights
                 and current.get(child) is not None
                 and previous.get(child) not in (None, 0)
+                and reference.get(child) not in (None, 0)
             ]
             if len(usable) != len(children):
+                if any(child not in weights for child in children):
+                    skips[SKIP_CHILD_WITHOUT_WEIGHT] += 1
+                elif any(reference.get(child) in (None, 0) for child in children):
+                    skips[SKIP_PRICE_REFERENCE_MISSING] += 1
+                else:
+                    skips[SKIP_CHILD_WITHOUT_OBSERVATION] += 1
                 continue
-            weight_total = sum(weights[child] for child in usable)
+            updated = {
+                child: weights[child] * float(previous[child]) / float(reference[child])
+                for child in usable
+            }
+            weight_total = sum(updated.values())
             if weight_total == 0:
+                skips[SKIP_ZERO_WEIGHT_TOTAL] += 1
                 continue
             reconstructed_relative = (
                 sum(
-                    weights[child] * float(current[child]) / float(previous[child])
+                    updated[child] * float(current[child]) / float(previous[child])
                     for child in usable
                 )
                 / weight_total
@@ -132,6 +195,7 @@ def validate_bottom_up(
                 {
                     "check": "bottom_up_monthly_rate",
                     "reference_date": ref_date,
+                    "price_reference_date": reference_date,
                     "parent_series_id": parent,
                     "published": (published_relative - 1.0) * 100.0,
                     "reconstructed": (reconstructed_relative - 1.0) * 100.0,
@@ -140,22 +204,43 @@ def validate_bottom_up(
                     "child_count": len(usable),
                 }
             )
-    return results
+    return results, skips
 
 
-def log_validation_summary(results: list[dict[str, Any]], label: str) -> tuple[int, int, float]:
-    """Log pass/fail counts and return ``(passed, failed, max_abs_residual)``."""
+def log_validation_summary(
+    results: list[dict[str, Any]], skips: Counter[str], label: str
+) -> tuple[int, int, int, float, float]:
+    """Log pass/fail/skip counts and coverage.
+
+    Returns ``(passed, failed, skipped, coverage, max_abs_residual)``. Coverage
+    is the share of reconcilable checks that actually ran, so a run that skips
+    everything reports 0.0 rather than a clean ``checks=0 passed=0 failed=0``.
+    """
     passed = sum(bool(row["passed"]) for row in results)
     failed = len(results) - passed
+    skipped = sum(skips.values())
+    unreconcilable = skips.get(SKIP_OUTSIDE_WEIGHTS_WINDOW, 0)
+    attempted = len(results) + skipped - unreconcilable
+    coverage = len(results) / attempted if attempted else 0.0
     max_residual = max((abs(float(row["residual"])) for row in results), default=0.0)
     logger.info(
-        "%s validation: checks=%d passed=%d failed=%d max_abs_residual=%.6f",
+        "%s validation: checks=%d passed=%d failed=%d skipped=%d coverage=%.4f "
+        "max_abs_residual=%.6f",
         label,
         len(results),
         passed,
         failed,
+        skipped,
+        coverage,
         max_residual,
     )
+    for reason, count in sorted(skips.items()):
+        if reason == SKIP_OUTSIDE_WEIGHTS_WINDOW:
+            logger.info(
+                "%s validation: %d checks not reconcilable at source (%s)", label, count, reason
+            )
+        else:
+            logger.warning("%s validation: %d checks skipped (%s)", label, count, reason)
     if failed:
         worst = sorted(results, key=lambda row: abs(float(row["residual"])), reverse=True)[:10]
         for row in worst:
@@ -167,4 +252,4 @@ def log_validation_summary(results: list[dict[str, Any]], label: str) -> tuple[i
                     row["parent_series_id"],
                     row["residual"],
                 )
-    return passed, failed, max_residual
+    return passed, failed, skipped, coverage, max_residual

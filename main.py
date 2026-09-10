@@ -15,9 +15,12 @@ from scripts.config import (
     DEFAULT_START_DATE,
     LOG_LEVEL,
     MAX_WAIT,
+    MIN_VALIDATION_COVERAGE,
     POLL_INTERVAL,
     ROOT_DIR,
     START_DATE_LOOKBACK_MONTHS,
+    missing_environment,
+    unresolved_credentials,
 )
 from scripts.db import build_engine
 from scripts.export_validation_xlsx import export_validation_xlsx
@@ -89,10 +92,20 @@ def _shift_months(value: date, months: int) -> date:
     return date(ordinal // 12, ordinal % 12 + 1, 1)
 
 
+def _anchor_to_january(value: date) -> date:
+    """Widen an extraction window back to its January price reference month.
+
+    Bottom-up reconciliation price-updates child weights to January of the
+    reconciled year, so a window that starts after January would carry no price
+    reference and silently reconcile nothing.
+    """
+    return date(value.year, 1, 1)
+
+
 def _wait_for_release(latest: date) -> tuple[dict[date, dict[str, float | None]], date] | None:
     """Poll until the month after ``latest`` appears or timeout expires."""
     expected = _shift_months(latest.replace(day=1), 1)
-    validation_start = _shift_months(expected, -1)
+    validation_start = _anchor_to_january(_shift_months(expected, -1))
     deadline = time.monotonic() + MAX_WAIT
     while True:
         parsed = collect_raw_data(validation_start)
@@ -109,19 +122,34 @@ def _wait_for_release(latest: date) -> tuple[dict[date, dict[str, float | None]]
 
 
 def _rewind_start(latest: date) -> date:
-    """Return the standard revision lookback month."""
-    return _shift_months(latest.replace(day=1), -START_DATE_LOOKBACK_MONTHS)
+    """Return the standard revision lookback month, anchored to its January."""
+    return _anchor_to_january(_shift_months(latest.replace(day=1), -START_DATE_LOOKBACK_MONTHS))
+
+
+def _preflight() -> None:
+    """Fail before any database or HTTP work if the environment is incomplete."""
+    missing = missing_environment()
+    if missing:
+        raise RuntimeError("Missing required environment variables: " + ", ".join(missing))
+    deferred = unresolved_credentials()
+    if deferred:
+        logger.warning(
+            "No %s set; the Databricks token must come from the notebook/job context",
+            " or ".join(deferred),
+        )
+    logger.info("Environment preflight passed")
 
 
 def main(args: argparse.Namespace) -> int:
     """Run extraction, validation, weights, time series, then metadata."""
     logger.info("Starting ONS UK CPI collector")
+    _preflight()
     engine = build_engine()
     init_db(engine)
     latest = get_max_reference_date(engine)
 
     if args.start_date is not None:
-        extraction_start = args.start_date.replace(day=1)
+        extraction_start = _anchor_to_january(args.start_date.replace(day=1))
         parsed = collect_raw_data(extraction_start)
     elif latest is None:
         extraction_start = DEFAULT_START_DATE
@@ -137,14 +165,33 @@ def main(args: argparse.Namespace) -> int:
 
     weights = collect_weights(max(extraction_start, date(2008, 1, 1)))
     hierarchy = build_hierarchy(list(get_series_catalog()))
-    weight_checks = validate_weight_sums(weights, hierarchy)
-    bottom_up_checks = validate_bottom_up(parsed, weights, hierarchy)
-    _, failed_weights, _ = log_validation_summary(weight_checks, "Basket-weight")
-    _, failed_bottom_up, _ = log_validation_summary(bottom_up_checks, "Bottom-up")
-    if args.strict_validation and (failed_weights or failed_bottom_up):
-        raise ValueError(
-            f"Validation failed: weight_checks={failed_weights}, bottom_up_checks={failed_bottom_up}"
-        )
+    weight_checks, weight_skips = validate_weight_sums(weights, hierarchy)
+    bottom_up_checks, bottom_up_skips = validate_bottom_up(parsed, weights, hierarchy)
+    _, failed_weights, _, weight_coverage, _ = log_validation_summary(
+        weight_checks, weight_skips, "Basket-weight"
+    )
+    _, failed_bottom_up, _, bottom_up_coverage, _ = log_validation_summary(
+        bottom_up_checks, bottom_up_skips, "Bottom-up"
+    )
+    if args.strict_validation:
+        problems = []
+        if failed_weights or failed_bottom_up:
+            problems.append(
+                f"tolerance breaches: weight_checks={failed_weights}, "
+                f"bottom_up_checks={failed_bottom_up}"
+            )
+        for label, checks, coverage in (
+            ("weight", weight_checks, weight_coverage),
+            ("bottom-up", bottom_up_checks, bottom_up_coverage),
+        ):
+            if not checks:
+                problems.append(f"{label} validation reconciled nothing")
+            elif coverage < MIN_VALIDATION_COVERAGE:
+                problems.append(
+                    f"{label} coverage {coverage:.4f} below minimum {MIN_VALIDATION_COVERAGE:.4f}"
+                )
+        if problems:
+            raise ValueError("Validation failed: " + "; ".join(problems))
 
     collected_at = datetime.now(UTC)
     new_obs, new_vintages = upsert_time_series(engine, parsed, collected_at)
