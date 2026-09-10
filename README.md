@@ -37,7 +37,8 @@ python main.py --no-watch
 
 On a populated database, `python main.py` waits for the next expected monthly
 release. Use `--no-watch` for a single revision-lookback pass, `--start-date`
-for a backfill, `--strict-validation` to make tolerance breaches fatal, and
+for a backfill, `--strict-validation` to make tolerance breaches, insufficient
+reconciliation coverage, or an empty check set fatal, and
 `--export-validation` to create an analyst workbook under `_verify_xls/`.
 
 See [METHODOLOGY.md](METHODOLOGY.md) for the hierarchy and reconciliation

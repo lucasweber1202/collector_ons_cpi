@@ -170,7 +170,9 @@ def upsert_metadata(
     desired = build_metadata_rows(parsed_by_date, get_series_aggregates(engine), collected_at)
     logger.info("Metadata upsert: evaluating %d series", len(desired))
     with engine.connect() as conn:
-        current_rows = conn.execute(text(f"SELECT * FROM {_TABLE}")).mappings().all()
+        current_rows = (
+            conn.execute(text(f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE}")).mappings().all()
+        )
     current = {str(row["series_id"]): dict(row) for row in current_rows}
     inserts: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []

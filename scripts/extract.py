@@ -40,6 +40,13 @@ CPI_DOWNLOAD_URL = (
     "consumerpriceinflation%2Fcurrent%2Fconsumerpriceinflationdetailedreferencetables.xlsx"
 )
 
+# A W1 label must reach this combined score (name similarity plus a bonus for an
+# exact hierarchy node) before its weight is attributed to a Table 38 series.
+WEIGHT_MATCH_THRESHOLD = 0.50
+# Below this gap between the best and second-best candidate the label did not
+# really decide the mapping, so the match is reported for human verification.
+AMBIGUOUS_MATCH_MARGIN = 0.05
+
 ECO_GROUPS = frozenset({"consumer_prices"})
 UNITS = frozenset({"index"})
 FREQUENCIES = frozenset({"monthly"})
@@ -114,14 +121,14 @@ def _build_client() -> httpx.Client:
     )
 
 
-def _http_get(client: httpx.Client, url: str) -> httpx.Response:
-    """GET an allowlisted ONS URL with bounded exponential-backoff retries."""
+def _http_get(client: httpx.Client, url: str, method: str = "GET") -> httpx.Response:
+    """Request an allowlisted ONS URL with bounded exponential-backoff retries."""
     if urlparse(url).hostname not in ALLOWED_HOSTS:
         raise ValueError(f"Refusing non-ONS URL: {url}")
     last_error: Exception | None = None
     for attempt in range(MAX_RETRIES + 1):
         try:
-            response = client.get(url)
+            response = client.request(method, url)
             if response.status_code not in {429, 500, 502, 503, 504}:
                 response.raise_for_status()
                 return response
@@ -287,16 +294,32 @@ def _match_weight_series(code: str, name: str, catalog: dict[str, dict[str, str]
     if not candidates:
         return None
     target = _slug(name)
-    scored = [
+    scored = sorted(
         (
-            SequenceMatcher(None, target, _slug(fields["name"])).ratio()
-            + (0.35 if fields["node"] == node else 0.0),
+            (
+                SequenceMatcher(None, target, _slug(fields["name"])).ratio()
+                + (0.35 if fields["node"] == node else 0.0),
+                series_id,
+            )
+            for series_id, fields in candidates
+        ),
+        reverse=True,
+    )
+    score, series_id = scored[0]
+    if score < WEIGHT_MATCH_THRESHOLD:
+        return None
+    if len(scored) > 1 and score - scored[1][0] < AMBIGUOUS_MATCH_MARGIN:
+        # A near-tie means the label alone did not decide the mapping. The
+        # weight still lands somewhere, so surface it rather than trust it.
+        logger.warning(
+            "W1 row code=%s name=%s matched %s by only %.4f over runner-up %s; verify the mapping",
+            code,
+            name,
             series_id,
+            score - scored[1][0],
+            scored[1][1],
         )
-        for series_id, fields in candidates
-    ]
-    score, series_id = max(scored)
-    return series_id if score >= 0.50 else None
+    return series_id
 
 
 def parse_weights_workbook(
@@ -311,7 +334,9 @@ def parse_weights_workbook(
     }
     parsed: dict[date, dict[str, float]] = {}
     matched: set[str] = set()
+    claimed_by: dict[str, tuple[str, str]] = {}
     unmatched = 0
+    conflicts = 0
     for row in range(5, len(frame.index)):
         label = _weight_code_name(frame.iat[row, 2])
         if label is None:
@@ -328,6 +353,16 @@ def parse_weights_workbook(
                 label[1],
             )
             continue
+        if series_id in claimed_by and claimed_by[series_id] != label:
+            # Two official rows describing one series is a mapping the last
+            # write would otherwise resolve silently.
+            logger.warning(
+                "W1 rows code=%s name=%s and code=%s name=%s both map to %s",
+                *claimed_by[series_id],
+                *label,
+                series_id,
+            )
+        claimed_by[series_id] = label
         matched.add(series_id)
         for column, header in headers.items():
             if header is None:
@@ -344,17 +379,46 @@ def parse_weights_workbook(
                 ref_date = date(year, month, 1)
                 if start_date and ref_date < start_date.replace(day=1):
                     continue
-                parsed.setdefault(ref_date, {})[series_id] = weight
+                previous = parsed.setdefault(ref_date, {}).get(series_id)
+                if previous is not None and previous != weight:
+                    # Duplicate rows agreeing on a value are harmless; disagreeing
+                    # ones mean the stored weight depends on workbook row order.
+                    conflicts += 1
+                    logger.warning(
+                        "Conflicting W1 weights for %s at %s: %r then %r (row %d, code=%s)",
+                        series_id,
+                        ref_date,
+                        previous,
+                        weight,
+                        row,
+                        label[0],
+                    )
+                parsed[ref_date][series_id] = weight
     if not parsed:
         raise ValueError("W1-CPI contained no usable weights")
     logger.info(
-        "Parsed weights for %d/%d CPI series across %d months (%d W1 rows unmatched)",
+        "Parsed weights for %d/%d CPI series across %d months "
+        "(%d W1 rows unmatched, %d conflicting values)",
         len(matched),
         len(catalog),
         len(parsed),
         unmatched,
+        conflicts,
     )
     return parsed
+
+
+def get_workbook_fingerprint() -> str | None:
+    """Return the CPI workbook's current entity tag without downloading its body.
+
+    Release polling compares this between attempts, so an unchanged workbook
+    costs one header request instead of a full download and parse. Returns
+    ``None`` when the source exposes no validator, which makes the caller fall
+    back to downloading rather than risk missing a release.
+    """
+    with _build_client() as client:
+        response = _http_get(client, CPI_DOWNLOAD_URL, method="HEAD")
+    return response.headers.get("etag")
 
 
 def collect_raw_data(start_date: date | None = None) -> dict[date, dict[str, float | None]]:
