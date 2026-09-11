@@ -29,9 +29,10 @@ class SpecialAggregate(TypedDict):
     complement_rate_12m_cdid: str
 
 
-# Every row below is linked by ONS on the MM23 time-series pages. The complement
-# is the published component removed from the exclusion index. Its annual weight
-# plus the exclusion weight equals 1,000 parts per 1,000 in the same MM23 year.
+# Every CDID below was verified against ONS MM23 pages. The complement is the
+# published component removed from the exclusion index. Where both annual
+# weights are published for the same year they provide a direct 1,000-parts
+# source-level reconciliation, without reconstructing the basket from names.
 EX_CPI_SPECIAL_AGGREGATES: tuple[SpecialAggregate, ...] = (
     {
         "label": "CPI excluding tobacco",
@@ -128,16 +129,24 @@ EX_CPI_SPECIAL_AGGREGATES: tuple[SpecialAggregate, ...] = (
 
 def validate_crosswalk() -> None:
     """Fail if a reviewed native identifier is accidentally duplicated."""
-    fields = (
-        "weight_cdid",
-        "index_cdid",
-        "rate_12m_cdid",
-        "complement_weight_cdid",
-        "complement_index_cdid",
-        "complement_rate_12m_cdid",
+    native_fields = (
+        ("weight_cdid", [row["weight_cdid"] for row in EX_CPI_SPECIAL_AGGREGATES]),
+        ("index_cdid", [row["index_cdid"] for row in EX_CPI_SPECIAL_AGGREGATES]),
+        ("rate_12m_cdid", [row["rate_12m_cdid"] for row in EX_CPI_SPECIAL_AGGREGATES]),
+        (
+            "complement_weight_cdid",
+            [row["complement_weight_cdid"] for row in EX_CPI_SPECIAL_AGGREGATES],
+        ),
+        (
+            "complement_index_cdid",
+            [row["complement_index_cdid"] for row in EX_CPI_SPECIAL_AGGREGATES],
+        ),
+        (
+            "complement_rate_12m_cdid",
+            [row["complement_rate_12m_cdid"] for row in EX_CPI_SPECIAL_AGGREGATES],
+        ),
     )
-    for field in fields:
-        values = [row[field] for row in EX_CPI_SPECIAL_AGGREGATES]
+    for field, values in native_fields:
         if len(values) != len(set(values)):
             raise ValueError(f"Duplicate MM23 {field} in ex-CPI crosswalk")
     for row in EX_CPI_SPECIAL_AGGREGATES:
