@@ -18,6 +18,7 @@ import main
 from scripts import extract, segments
 from scripts.special_aggregate_rates import published_12m_rate_checks
 from scripts.special_aggregate_vintages import (
+    build_exclusion_weight_regimes,
     collect_mm23_snapshot,
     discover_mm23_snapshots,
     january_regime_snapshots,
@@ -37,6 +38,8 @@ def test_source_replay_twice_and_logged_failure(
     observations = extract.collect_raw_data(date(1988, 1, 1))
     basket = extract.collect_weights(date(2008, 1, 1))
     catalog = extract.get_series_catalog()
+    release_date = extract.get_last_publish_date()
+    assert release_date is not None
 
     # The ex-CPI layer is a reviewed MM23 identity map onto the Table 38 ALT
     # series already collected here. A missing CDID means ONS scope changed and
@@ -72,26 +75,47 @@ def test_source_replay_twice_and_logged_failure(
     )
 
     # From 2017 onward, the final January regime is the full-MM23 version
-    # superseded by the scheduled March release. Replay the latest such snapshot
-    # and verify that the source-published exclusion/complement pairs still sum
-    # to 1,000 before any historical persistence design is enabled.
+    # superseded by the scheduled March release. In February of the current year
+    # that archive does not exist yet because the current MM23 file *is* the
+    # January regime. The test handles both legitimate states explicitly.
     weight_year = max(mm23.annual_weights)
-    january_snapshots = january_regime_snapshots(discover_mm23_snapshots())
-    assert weight_year in january_snapshots
-    january_snapshot = january_snapshots[weight_year]
-    assert january_snapshot.reason == "scheduled"
-    assert january_snapshot.superseded_at.month == 3
-    january_mm23 = collect_mm23_snapshot(january_snapshot)
-    assert weight_year in january_mm23.annual_weights
-    january_weight_checks = complement_weight_checks(january_mm23, latest_only=True)
-    assert len(january_weight_checks) == len(EX_CPI_SPECIAL_AGGREGATES)
-    failed_january_weights = [
-        check for check in january_weight_checks if not check["passed"]
-    ]
-    assert not failed_january_weights, (
-        f"Archived January MM23 complement weights do not sum to 1000: "
-        f"{failed_january_weights}"
+    january_panels: dict[int, object] = {}
+    january_snapshot_id = "current-February-release"
+    archived = january_regime_snapshots(discover_mm23_snapshots())
+    if weight_year in archived:
+        january_snapshot = archived[weight_year]
+        assert january_snapshot.reason == "scheduled"
+        assert january_snapshot.superseded_at.month == 3
+        january_mm23 = collect_mm23_snapshot(january_snapshot)
+        assert weight_year in january_mm23.annual_weights
+        january_weight_checks = complement_weight_checks(january_mm23, latest_only=True)
+        assert len(january_weight_checks) == len(EX_CPI_SPECIAL_AGGREGATES)
+        failed_january_weights = [
+            check for check in january_weight_checks if not check["passed"]
+        ]
+        assert not failed_january_weights, (
+            f"Archived January MM23 complement weights do not sum to 1000: "
+            f"{failed_january_weights}"
+        )
+        january_panels[weight_year] = january_mm23
+        january_snapshot_id = january_snapshot.version_id
+    else:
+        assert release_date.year == weight_year and release_date.month == 2
+
+    typed_january_panels = {
+        year: panel for year, panel in january_panels.items() if hasattr(panel, "annual_weights")
+    }
+    special_weight_regimes = build_exclusion_weight_regimes(
+        mm23,
+        release_date,
+        typed_january_panels,  # type: ignore[arg-type]
+        start_year=weight_year,
     )
+    assert date(weight_year, 1, 1) in special_weight_regimes
+    if release_date.year > weight_year or release_date.month >= 3:
+        assert date(weight_year, 12, 1) in special_weight_regimes
+    else:
+        assert set(special_weight_regimes) == {date(weight_year, 1, 1)}
 
     weight_codes = [fields["code"] for fields in extract.get_original_weight_catalog().values()]
     panel = segments.collect_segments(date(1988, 1, 1), catalog, weight_codes)
@@ -168,5 +192,5 @@ def test_source_replay_twice_and_logged_failure(
         f"segments={len(panel.catalog)}",
         f"ex_cpi={len(resolved_ex_cpi)}",
         f"ex_cpi_rates={len(special_rate_checks)}",
-        f"january_snapshot={january_snapshot.version_id}",
+        f"january_snapshot={january_snapshot_id}",
     )
