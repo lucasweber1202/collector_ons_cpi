@@ -40,7 +40,7 @@ def published_12m_rate_checks(
     checks: list[dict[str, object]] = []
     for aggregate in EX_CPI_SPECIAL_AGGREGATES:
         series_id = resolved[aggregate["index_cdid"]]
-        candidates: list[dict[str, object]] = []
+        candidates: list[tuple[date, dict[str, object]]] = []
         for month, rates in panel.monthly_rates_12m.items():
             published = rates.get(aggregate["rate_12m_cdid"])
             current = table38.get(month, {}).get(series_id)
@@ -50,20 +50,19 @@ def published_12m_rate_checks(
                 continue
             calculated = 100.0 * (float(current) / float(previous) - 1.0)
             residual = calculated - published
-            candidates.append(
-                {
-                    "label": aggregate["label"],
-                    "series_id": series_id,
-                    "rate_cdid": aggregate["rate_12m_cdid"],
-                    "month": month,
-                    "calculated_rate": calculated,
-                    "published_rate": published,
-                    "residual_pp": residual,
-                    "passed": abs(residual) <= tolerance_pp,
-                }
-            )
+            check: dict[str, object] = {
+                "label": aggregate["label"],
+                "series_id": series_id,
+                "rate_cdid": aggregate["rate_12m_cdid"],
+                "month": month,
+                "calculated_rate": calculated,
+                "published_rate": published,
+                "residual_pp": residual,
+                "passed": abs(residual) <= tolerance_pp,
+            }
+            candidates.append((month, check))
         if latest_only and candidates:
-            checks.append(max(candidates, key=lambda check: check["month"]))
+            checks.append(max(candidates, key=lambda item: item[0])[1])
         else:
-            checks.extend(sorted(candidates, key=lambda check: check["month"]))
+            checks.extend(check for _, check in sorted(candidates, key=lambda item: item[0]))
     return checks
