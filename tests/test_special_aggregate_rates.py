@@ -49,7 +49,7 @@ def test_published_12m_rates_reconcile_for_all_reviewed_exclusions() -> None:
 
     assert len(checks) == len(EX_CPI_SPECIAL_AGGREGATES)
     assert all(check["passed"] is True for check in checks)
-    assert all(float(check["residual_pp"]) == pytest.approx(0.0) for check in checks)
+    assert all(check["residual_pp"] == pytest.approx(0.0) for check in checks)
 
 
 def test_published_12m_rate_check_surfaces_a_wrong_mm23_rate() -> None:
@@ -65,7 +65,7 @@ def test_published_12m_rate_check_surfaces_a_wrong_mm23_rate() -> None:
     )
 
     assert core["passed"] is False
-    assert float(core["residual_pp"]) == pytest.approx(0.2)
+    assert core["residual_pp"] == pytest.approx(0.2)
 
 
 def test_published_12m_rate_check_rejects_missing_table38_alt_target() -> None:
