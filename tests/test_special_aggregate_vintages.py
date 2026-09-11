@@ -9,6 +9,7 @@ import pytest
 from scripts.special_aggregate_vintages import (
     build_exclusion_weight_regimes,
     january_regime_snapshots,
+    map_exclusion_weight_regimes_to_table38,
     parse_mm23_snapshot_index,
 )
 from scripts.special_aggregates import EX_CPI_SPECIAL_AGGREGATES, MM23SpecialPanel
@@ -40,6 +41,16 @@ def _weight_panel(values_by_year: dict[int, float]) -> MM23SpecialPanel:
             aggregate["weight_cdid"]: value for aggregate in EX_CPI_SPECIAL_AGGREGATES
         }
     return MM23SpecialPanel(annual_weights=annual, monthly_indices={}, monthly_rates_12m={})
+
+
+def _alt_catalog() -> dict[str, dict[str, str]]:
+    return {
+        f"CPI_ALT_A{index:02d}_{aggregate['index_cdid']}": {
+            "family": "ALT",
+            "native_id": aggregate["index_cdid"],
+        }
+        for index, aggregate in enumerate(EX_CPI_SPECIAL_AGGREGATES, start=1)
+    }
 
 
 def test_snapshot_index_parses_version_url_date_and_reason() -> None:
@@ -150,3 +161,34 @@ def test_pre_2017_weight_applies_to_all_twelve_months_without_archive() -> None:
     assert len(expanded) == 12
     assert {month.month for month in expanded} == set(range(1, 13))
     assert all(values["A9FU"] == 788.0 for values in expanded.values())
+
+
+def test_weight_regimes_map_onto_existing_alt_series_ids() -> None:
+    regimes = {
+        date(2026, 1, 1): {
+            aggregate["weight_cdid"]: 700.0 + index
+            for index, aggregate in enumerate(EX_CPI_SPECIAL_AGGREGATES)
+        }
+    }
+
+    mapped = map_exclusion_weight_regimes_to_table38(regimes, _alt_catalog())
+
+    core_series = next(
+        series_id for series_id in _alt_catalog() if series_id.endswith("_DKC6")
+    )
+    assert mapped[date(2026, 1, 1)][core_series] == 702.0
+    assert len(mapped[date(2026, 1, 1)]) == len(EX_CPI_SPECIAL_AGGREGATES)
+
+
+def test_weight_regime_mapping_rejects_missing_alt_target() -> None:
+    regimes = {
+        date(2026, 1, 1): {
+            aggregate["weight_cdid"]: 800.0 for aggregate in EX_CPI_SPECIAL_AGGREGATES
+        }
+    }
+    catalog = _alt_catalog()
+    missing = next(series_id for series_id in catalog if series_id.endswith("_DKC6"))
+    del catalog[missing]
+
+    with pytest.raises(ValueError, match="Table 38 ALT CDIDs missing.*DKC6"):
+        map_exclusion_weight_regimes_to_table38(regimes, catalog)
