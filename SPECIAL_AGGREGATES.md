@@ -1,6 +1,6 @@
 # UK CPI ex-CPI / special aggregates mapping
 
-Status: the first exclusion set is mapped and has validation-only MM23 weight and 12-month-rate checks. MM23 annual weights are intentionally **not persisted** yet.
+Status: the first exclusion set is mapped and has validation-only MM23 weight and 12-month-rate checks. The weight-regime semantics are now source-verified; persistence is still held back until the historical January regimes are collected from MM23 snapshots and the full verification loop passes.
 
 ## Why this stays in `collector_ons_cpi`
 
@@ -9,11 +9,11 @@ The ONS publishes the exclusion measures inside the same CPI statistical family.
 ## Authoritative sources
 
 - Table 38, Consumer price inflation detailed reference tables: stored monthly `ALT` index levels.
-- MM23, Consumer price inflation time series: validation/mapping source for annual special-aggregate weights, related index CDIDs and published 12-month rates.
+- MM23, Consumer price inflation time series: validation/mapping source for special-aggregate weights, related index CDIDs and published 12-month rates.
 - W1-CPI: source for the standard COICOP basket hierarchy; MM23 does not replace it.
-- ONS higher-level aggregation methodology: source for the CPI double-weight regime above consumption-segment level.
+- ONS higher-level aggregation methodology and annual weights release: source for the CPI double-weight regime above consumption-segment level.
 
-Current ONS methodology: above consumption-segment level CPI/CPIH use December-reference weights for January aggregation and January-reference weights for February through December. This is the reason a single annual MM23 weight must not be expanded to twelve monthly rows without first identifying which reference regime it represents.
+ONS uses two higher-level CPI/CPIH weight updates from 2017 onward: December-reference weights for January aggregation and January-reference weights for February through December.
 
 ## Reviewed exclusion crosswalk
 
@@ -55,7 +55,7 @@ The parser follows the published MM23 file contract: skip the title row, use the
 
 For each exclusion, MM23 also publishes the weight of the removed component. `complement_weight_checks()` compares the two source-published weights directly against 1,000 parts per 1,000.
 
-Example for 2026 core CPI:
+Example for the current 2026 core CPI regime:
 
 ```text
 A9FU = 794.8781
@@ -77,18 +77,46 @@ It then compares that value with the related MM23 published 12-month-rate CDID (
 
 The unit tests cover all ten aggregates, a deliberately wrong MM23 rate, a missing Table 38 target and latest-month selection. The opt-in live-source replay checks the latest common month for all ten aggregates. MM23 rates remain validation-only and are not stored as duplicate time series.
 
-## Unresolved storage question: annual MM23 weights
+## Weight-regime semantics: resolved
 
-The MM23 exclusion weights are annual observations. The existing `original_weights` table is reference-month based and already preserves the two W1 regimes plus the separate consumption-segment basket boundary.
+The current MM23 annual weight is not a generic twelve-month weight. Official 2026 releases show that it is the **second CPI weight update used from February through December**.
 
-ONS currently documents two higher-level CPI weight reference periods each year:
+For core CPI:
 
-- December-reference weights used for January;
-- January-reference weights used for February through December.
+```text
+January 2026 bulletin:  CPI excluding energy, food, alcohol and tobacco = 796.0030
+Current MM23 A9FU:                                                = 794.8781
+```
 
-The single annual MM23 special-aggregate value has not yet been proven to represent one specific regime, both regimes, or a publication summary with different semantics. Therefore this branch deliberately does not copy it into monthly `original_weights` rows.
+For the energy component:
 
-Until that relationship is source-verified:
+```text
+January 2026 bulletin:  energy = 58.3320
+Current MM23 A9F3:             = 58.3510
+```
+
+The current MM23 values match the weights used in the February-December 2026 CPI tables. This is consistent with ONS's documented double-update method: the first update is used only for January; the second update is introduced with the February index released in March.
+
+### How to recover January without inventing a value
+
+MM23 preserves superseded dataset versions. The full dataset history shows a version superseded on 25 March 2026 at 07:00, immediately before the second 2026 weight update became current. Its CSV is stored under the versioned MM23 path `previous/v130/mm23.csv`. That snapshot represents the January-weight regime after the February CPI release. The later/current MM23 snapshot represents the February-December regime.
+
+Therefore the source-backed storage design is:
+
+```text
+pre-2017: one published annual regime -> January through December
+2017 onward:
+    February-release MM23 snapshot -> January reference month only
+    March-release/current MM23 snapshot -> February through December
+```
+
+A historical build must combine the two source vintages for each double-update year. It must not fill January with the later Feb-Dec value when the February snapshot is unavailable.
+
+## What is still deliberately not persisted
+
+The evidence now supports the regime interpretation, but this branch still does not write MM23 special-aggregate weights to `original_weights`. Before changing persistence, the collector needs a reviewed historical snapshot discovery/selection step and a live replay proving that both annual regimes are recovered without gaps or collisions.
+
+Until that gate exists:
 
 - Table 38 remains the stored monthly index source;
 - MM23 remains mapping/validation input only;
@@ -98,10 +126,11 @@ Until that relationship is source-verified:
 
 ## Remaining implementation tasks
 
-1. Run the full local verification loop and the opt-in live-source replay on this branch, recording the measured MM23 rate residuals.
-2. Investigate the annual special-aggregate weight's exact relationship to the ONS December/January double-weight regimes.
-3. Decide, based on that evidence, whether MM23 annual weights belong in `original_weights` or should remain validation-only.
-4. Only if persistence is justified, integrate the MM23 layer into `main.py`, logging and audit export with the same fail-before-write discipline as the existing bottom-up checks.
+1. Implement MM23 historical snapshot discovery and select the February and March weight snapshots for each double-update year.
+2. Build the two source-backed monthly weight regimes and test that January and February-December are never silently conflated.
+3. Run the full local verification loop and opt-in live replay, recording measured rate and weight residuals.
+4. If all gates pass, persist the reviewed ex-CPI weights in `original_weights` and integrate the checks into `main.py` before writes.
+5. Extend the audit workbook and `COMPLIANCE.md` with the new source/vintage semantics.
 
 ## Revision evidence
 
