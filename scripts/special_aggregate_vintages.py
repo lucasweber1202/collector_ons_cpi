@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from html.parser import HTMLParser
 from urllib.parse import unquote, urljoin
 
+from scripts.config import DOWNLOAD_DELAY
 from scripts.special_aggregates import (
     EX_CPI_SPECIAL_AGGREGATES,
     MM23_DATASET_URL,
@@ -318,3 +320,43 @@ def collect_mm23_snapshot(snapshot: MM23Snapshot) -> MM23SpecialPanel:
     with build_client() as client:
         response = http_get(client, snapshot.csv_url)
     return parse_mm23_special_aggregates(response.content)
+
+
+def collect_january_weight_panels(
+    snapshots: Mapping[int, MM23Snapshot],
+    *,
+    start_year: int,
+    end_year: int,
+) -> dict[int, MM23SpecialPanel]:
+    """Download a bounded range of archived January-regime MM23 panels.
+
+    This is intentionally separate from the normal monthly collection path.
+    Full-MM23 snapshots are large, so historical backfill is explicit, bounded
+    by year, reuses one HTTP client and observes the collector download delay.
+    A requested double-update year with no scheduled-March snapshot fails rather
+    than silently shortening the backfill.
+    """
+    if end_year < start_year:
+        raise ValueError(f"Invalid MM23 snapshot year range: {start_year}..{end_year}")
+    required_years = list(range(max(start_year, DOUBLE_WEIGHT_START_YEAR), end_year + 1))
+    missing = [year for year in required_years if year not in snapshots]
+    if missing:
+        raise ValueError(f"Missing scheduled-March MM23 snapshots for years: {missing}")
+    if not required_years:
+        return {}
+
+    from scripts.extract import build_client, http_get
+
+    panels: dict[int, MM23SpecialPanel] = {}
+    with build_client() as client:
+        for position, year in enumerate(required_years):
+            if position and DOWNLOAD_DELAY:
+                time.sleep(DOWNLOAD_DELAY)
+            response = http_get(client, snapshots[year].csv_url)
+            panel = parse_mm23_special_aggregates(response.content)
+            if year not in panel.annual_weights:
+                raise ValueError(
+                    f"Archived MM23 snapshot {snapshots[year].version_id} has no weights for {year}"
+                )
+            panels[year] = panel
+    return panels
