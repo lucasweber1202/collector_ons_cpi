@@ -59,6 +59,20 @@ python -m scripts.init_db
 python main.py --no-watch
 ```
 
+For development and the verification loop:
+
+```bash
+pip install -e ".[dev]"
+python -m pytest -q -W ignore::DeprecationWarning
+ruff check . && ruff format --check .
+python -m mypy
+```
+
+Two suites are opt-in because they reach outside the process:
+`ONS_LIVE_TEST=1` replays the live ONS source into a throwaway database, and
+`DATABRICKS_SQL_PARSE_TEST=1` parses every emitted statement with Spark's own
+SQL parser.
+
 Useful queries and the current values view are in [COMPLIANCE.md](COMPLIANCE.md).
 
 ## Running modes

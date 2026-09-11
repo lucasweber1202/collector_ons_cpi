@@ -160,6 +160,64 @@ like pre-2008 months in the weights window. No operational share is derived for
 a month whose link does not exist, so `weights` carries segment shares only from
 March through December of each chain year.
 
+## Worked reproductions from the stored tables
+
+Both examples below use only rows the collector persists: `time_series`,
+`weights` and the `parent_series_id` recorded in `metadata` and the Series Map.
+No source file is needed to check them.
+
+### A COICOP parent from its COICOP children
+
+`CPI_COICOP_D01_D7BU` (01 Food and non-alcoholic beverages), July 2026. The
+price reference is January 2026, and the two children are the published groups.
+
+| Child | `weights` phi | I(Jun 2026) | I(Jul 2026) |
+| --- | ---: | ---: | ---: |
+| `CPI_COICOP_G011_D7C8` FOOD | 0.8866345377 | 143.166 | 143.151 |
+| `CPI_COICOP_G012_D7C9` NON-ALCOHOLIC BEVERAGES | 0.1133654623 | 150.981 | 151.078 |
+
+The stored shares already carry the price update, so they apply directly:
+
+```text
+R_hat = 0.8866345377 * 143.151/143.166 + 0.1133654623 * 151.078/150.981
+      = 0.9999799375
+published = 144.029/144.032 = 0.9999791713
+residual  = +0.0000766 percentage points
+```
+
+Reproducing the shares from `original_weights` instead, with the January 2026
+reference levels 143.254 and 149.471 and the W1 weights 97.2974 and 12.3085:
+
+```text
+phi_FOOD = 97.2974 * 143.166/143.254
+         / (97.2974 * 143.166/143.254 + 12.3085 * 150.981/149.471)
+         = 0.8866345377
+```
+
+### A published parent from its consumption segments
+
+`CPI_COICOP_C0452_D7DU` (04.5.2 Gas), July 2026. Both months lie outside
+January, so the link is defined and the stored shares apply directly.
+
+| Segment | `original_weights` (pts/1000) | `weights` phi | I(Jun 2026) | I(Jul 2026) |
+| --- | ---: | ---: | ---: | ---: |
+| `CPI_CS_SEG_420301` GAS | 6.479 | 0.6157237353 | 94.615 | 116.254 |
+| `CPI_CS_SEG_420302` GAS - FIXED TARIFF | 3.489 | 0.3505107961 | 100.019 | 101.473 |
+| `CPI_CS_SEG_420404` BUTANE GAS | 0.333 | 0.0337654685 | 100.951 | 104.392 |
+
+```text
+R_hat     = 0.6157237353 * 116.254/94.615
+          + 0.3505107961 * 101.473/100.019
+          + 0.0337654685 * 104.392/100.951
+          = 1.1470659776
+published = 158.997/138.611 = 1.1470734646
+residual  = -0.0007487 percentage points
+```
+
+The segment index levels are on the January 2026 reference and the parent is on
+2015=100. Only the ratios are compared, so the two references never have to be
+reconciled -- which is also why the same arithmetic is invalid across a January.
+
 ## Stored weights
 
 - `original_weights` holds the official published value, untouched.

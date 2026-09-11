@@ -46,5 +46,8 @@ document and `.github/skills/` before changing anything here.
 - Verify endpoints, workbook layouts and CSV layouts against current official
   ONS sources; the schema gates in `extract.py` and `segments.py` must fail
   loudly rather than trust a moved column.
+- Every SQL statement the collector sends is listed in
+  `tests/conftest.py::emitted_sql`. Add a new query there too, or it is checked
+  by neither the portable-subset gate nor the Spark grammar gate.
 - Run the verification loop in `.github/skills/verification-loop/SKILL.md`
-  before every PR.
+  before every PR. It includes `python -m mypy`, which must stay clean.

@@ -178,11 +178,14 @@ describe a partially written history.
 ## Verification commands
 
 ```bash
+pip install -e ".[dev]"
 python -m pytest -q -W ignore::DeprecationWarning
 ruff check .
 ruff format --check .
+python -m mypy
 python -m compileall -q main.py scripts tests
 ONS_LIVE_TEST=1 python -m pytest tests/test_live_source.py -q -W ignore::DeprecationWarning
+DATABRICKS_SQL_PARSE_TEST=1 python -m pytest tests/test_databricks_sql_grammar.py -q
 python -m scripts.init_db && python main.py --no-watch --export-validation
 ```
 
@@ -206,13 +209,14 @@ WHERE rn = 1;
 | Gate | Status | Evidence |
 | --- | --- | --- |
 | Build/import | PASS | `python -m compileall -q main.py scripts tests` |
-| Type check | SKIP | no mypy/pyright configured in this repository |
+| Type check | PASS | `python -m mypy` — 42 source files, no issues, under `disallow_untyped_defs`, `warn_unreachable`, `warn_unused_ignores`, `warn_redundant_casts`, `no_implicit_optional` |
 | Ruff lint | PASS | `ruff check .` — all checks passed |
-| Ruff format | PASS | `ruff format --check .` — 40 files already formatted |
-| Tests | PASS | 200 passed, 1 skipped (the live test is opt-in) |
+| Ruff format | PASS | `ruff format --check .` — all files already formatted |
+| Tests | PASS | 331 passed, 3 skipped (the live-source and Spark-grammar tests are opt-in) |
 | Live ONS source | PASS | `ONS_LIVE_TEST=1` replay: two identical runs then an injected failure; 90,064 observations, 48,694 operational weights, 68,574 original weights, 870 metadata rows; every series' first, middle and last published value compared against the parsed source |
 | PostgreSQL 16.13 | PASS | `python -m scripts.init_db`, full live build, unchanged second run, forced same-day revisions exercising the MERGE path on all four tables, and an injected validation failure |
-| Databricks | SKIP | no Databricks workspace or credentials are reachable from this environment; SQL reviewed statically instead (see below) |
+| Databricks execution | SKIP | no Databricks workspace or credentials are reachable from this environment |
+| Databricks SQL grammar | PASS | every emitted statement parsed by Spark 4.1.1's own SQL parser (see below) |
 | Security review | PASS | see below |
 | Diff review | PASS | `git diff --stat` and full diff reviewed; no secret, `.env`, debug print, generated workbook or binary committed |
 
@@ -239,16 +243,35 @@ WHERE rn = 1;
   values, 0 operational weights outside `[0, 1]`, one country, one frequency,
   one unit and one eco_group.
 
-### Databricks static analysis (not executed)
+### Databricks SQL: parsed by the engine's own grammar
 
-Every statement the collector emits is rendered and asserted in
-`tests/test_init_db_portability.py` to contain no `SERIAL`, `JSONB`,
-`ON CONFLICT`, `RETURNING`, `ILIKE`, `DISTINCT ON`, `FILTER (`, `::` cast,
-`DOUBLE PRECISION`, `TIMESTAMPTZ`, `NOW()` or `CURRENT_TIMESTAMP`, to inline no
-literal, and to interpolate only the trusted schema constant. `MERGE` matches on
-the full natural key rather than relying on a primary key, because Databricks
-treats key constraints as informational. The 64-bit float spelling is selected
-per dialect. This is a static review; it is **not** a Databricks certification.
+`tests/conftest.py::emitted_sql` is the single inventory of every statement the
+collector sends — 31 of them, covering the six DDL statements and every insert,
+merge, update, guard and read. Two gates run over that one inventory, so a query
+added to the collector cannot be reviewed by neither.
+
+1. `tests/test_init_db_portability.py` asserts that no statement uses `SERIAL`,
+   `JSONB`, `ON CONFLICT`, `RETURNING`, `ILIKE`, `DISTINCT ON`, `FILTER (`, a
+   `::` cast, `DOUBLE PRECISION`, `TIMESTAMPTZ`, `NOW()` or
+   `CURRENT_TIMESTAMP`; that the only inlined literals are the reviewed set
+   `{'CPI%', '_', ''}`, so no value stopped travelling as a bound parameter;
+   that every statement addresses only the collector schema; and that `MERGE`
+   matches on the full natural key rather than relying on a primary key,
+   because Databricks treats key constraints as informational.
+2. `tests/test_databricks_sql_grammar.py` (opt-in, about eight seconds) parses
+   all 31 statements with **Spark 4.1.1's own SQL parser**, reached through the
+   `pyspark` dependency the collector already declares for token resolution.
+   Databricks SQL is Spark SQL, so this replaces a reviewer's reading of the
+   SQL with the engine's verdict on it. All 31 parse, including
+   `BIGINT GENERATED ALWAYS AS IDENTITY`, the informational `PRIMARY KEY`
+   constraints, the `MERGE ... USING (SELECT ... UNION ALL ...)` shape and the
+   named `:parameter` markers. The suite includes a negative control — a
+   PostgreSQL `ON CONFLICT` statement that the parser must reject — so a gate
+   that silently stopped checking anything would fail.
+
+What this does **not** prove: Unity Catalog semantics, Delta table behaviour,
+permissions, or that a MERGE produces the intended rows on a real warehouse.
+Those still require the Databricks execution gate below, which remains SKIP.
 
 ### Security review
 
@@ -280,7 +303,7 @@ per dialect. This is a static review; it is **not** a Databricks certification.
 
 `tests/` is justified by this collector's parsing, hierarchy, vintage, weight,
 mathematical-transformation, release-polling and forecast-target validation
-logic. 200 committed tests cover: stable identifiers and the legacy-identifier
+logic. 331 committed tests cover: stable identifiers and the legacy-identifier
 guard; deterministic weights-workbook selection across years, orders, absence
 and rename; Table 38, W1 and consumption-segment schema drift; consumption
 segment classification in both published layouts, the classification framework's
@@ -290,14 +313,25 @@ chain link and the February–December regime; ground-truth bottom-up
 reconstruction for both layers; operational weight reproduction; original-weight
 preservation and regime years; same-day and later-day vintages; two-run
 idempotency; mid-persistence failure rollback; release polling; the audit
-workbook including as-of vintage selection; SQL portability; HTTP retry, rate
-limiting and download bounds; and the declared dependency surface.
+workbook including as-of vintage selection and the empty-database case; SQL
+portability and the Spark grammar; HTTP retry, rate limiting and download
+bounds; engine construction and credential redaction; run-log truncation and
+best-effort persistence; every spelling pandas uses for an empty workbook cell;
+and the declared dependency surface.
+
+The two worked reproductions in METHODOLOGY.md are pinned by
+`tests/test_documented_examples.py`: it feeds the documented inputs through the
+shipped functions and asserts the documented shares and residuals, and checks
+that the published residual table still reports zero failures. A formula change
+therefore cannot leave the documentation quietly wrong.
 
 ## Remaining gates
 
-1. **Databricks.** Execute the DDL, MERGE, two-run and failure tests in an
-   approved Databricks workspace. Not reachable from this environment; marked
-   SKIP above, never PASS.
+1. **Databricks execution.** Execute the DDL, MERGE, two-run and failure tests
+   in an approved Databricks workspace. Not reachable from this environment;
+   marked SKIP above, never PASS. The grammar of every emitted statement is
+   now validated by Spark's own parser, which narrows the risk to runtime and
+   catalog semantics rather than syntax.
 2. **Live pilot comparison.** `guimasuko/collector_template` could not be
    reached from this session (cross-owner attachment is unsupported here and an
    anonymous clone is refused), and the only other fleet repository,
@@ -315,8 +349,9 @@ limiting and download bounds; and the declared dependency surface.
    segment product began. They are deliberately not stitched into the segment
    series. Extending coverage backwards is a separate, scoped decision.
 5. **Intake status.** `lucasweber1202/Coletores/intake/collector_demands.csv`
-   still records this collector as `building` with a stale next action; update
-   it in that repository, which this session cannot push to.
+   is updated to `verification` with the remaining gates as its next action in
+   `lucasweber1202/Coletores` PR #5; it is `verification` rather than `ready`
+   precisely because gate 1 above is unexecuted.
 
 Sources:
 - [ONS CPI detailed tables](https://www.ons.gov.uk/economy/inflationandpriceindices/datasets/consumerpriceinflation)
