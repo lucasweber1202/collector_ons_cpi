@@ -16,6 +16,7 @@ from sqlalchemy.engine import Engine
 
 import main
 from scripts import extract, segments
+from scripts.special_aggregate_rates import published_12m_rate_checks
 from scripts.special_aggregates import (
     EX_CPI_SPECIAL_AGGREGATES,
     collect_mm23_special_aggregates,
@@ -42,13 +43,28 @@ def test_source_replay_twice_and_logged_failure(
     }
 
     # MM23 is validation-only at this stage: prove the reviewed columns still
-    # exist and that each latest exclusion weight reconciles with the official
-    # removed-component weight. Nothing from this panel is persisted here.
+    # exist, reconcile each latest exclusion/complement weight pair, and compare
+    # the Table 38 12-month change with MM23's independently published rate.
+    # Nothing from this panel is persisted here.
     mm23 = collect_mm23_special_aggregates()
     special_weight_checks = complement_weight_checks(mm23, latest_only=True)
     assert len(special_weight_checks) == len(EX_CPI_SPECIAL_AGGREGATES)
     failed_special_weights = [check for check in special_weight_checks if not check["passed"]]
-    assert not failed_special_weights, f"MM23 complement weights do not sum to 1000: {failed_special_weights}"
+    assert not failed_special_weights, (
+        f"MM23 complement weights do not sum to 1000: {failed_special_weights}"
+    )
+
+    special_rate_checks = published_12m_rate_checks(
+        observations,
+        catalog,
+        mm23,
+        latest_only=True,
+    )
+    assert len(special_rate_checks) == len(EX_CPI_SPECIAL_AGGREGATES)
+    failed_special_rates = [check for check in special_rate_checks if not check["passed"]]
+    assert not failed_special_rates, (
+        f"Table 38 levels do not reconcile with MM23 12m rates: {failed_special_rates}"
+    )
 
     weight_codes = [fields["code"] for fields in extract.get_original_weight_catalog().values()]
     panel = segments.collect_segments(date(1988, 1, 1), catalog, weight_codes)
@@ -124,4 +140,5 @@ def test_source_replay_twice_and_logged_failure(
         {table: len(rows) for table, rows in first.items()},
         f"segments={len(panel.catalog)}",
         f"ex_cpi={len(resolved_ex_cpi)}",
+        f"ex_cpi_rates={len(special_rate_checks)}",
     )
