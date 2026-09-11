@@ -17,6 +17,11 @@ from sqlalchemy.engine import Engine
 import main
 from scripts import extract, segments
 from scripts.special_aggregate_rates import published_12m_rate_checks
+from scripts.special_aggregate_vintages import (
+    collect_mm23_snapshot,
+    discover_mm23_snapshots,
+    january_regime_snapshots,
+)
 from scripts.special_aggregates import (
     EX_CPI_SPECIAL_AGGREGATES,
     collect_mm23_special_aggregates,
@@ -64,6 +69,28 @@ def test_source_replay_twice_and_logged_failure(
     failed_special_rates = [check for check in special_rate_checks if not check["passed"]]
     assert not failed_special_rates, (
         f"Table 38 levels do not reconcile with MM23 12m rates: {failed_special_rates}"
+    )
+
+    # From 2017 onward, the final January regime is the full-MM23 version
+    # superseded by the scheduled March release. Replay the latest such snapshot
+    # and verify that the source-published exclusion/complement pairs still sum
+    # to 1,000 before any historical persistence design is enabled.
+    weight_year = max(mm23.annual_weights)
+    january_snapshots = january_regime_snapshots(discover_mm23_snapshots())
+    assert weight_year in january_snapshots
+    january_snapshot = january_snapshots[weight_year]
+    assert january_snapshot.reason == "scheduled"
+    assert january_snapshot.superseded_at.month == 3
+    january_mm23 = collect_mm23_snapshot(january_snapshot)
+    assert weight_year in january_mm23.annual_weights
+    january_weight_checks = complement_weight_checks(january_mm23, latest_only=True)
+    assert len(january_weight_checks) == len(EX_CPI_SPECIAL_AGGREGATES)
+    failed_january_weights = [
+        check for check in january_weight_checks if not check["passed"]
+    ]
+    assert not failed_january_weights, (
+        f"Archived January MM23 complement weights do not sum to 1000: "
+        f"{failed_january_weights}"
     )
 
     weight_codes = [fields["code"] for fields in extract.get_original_weight_catalog().values()]
@@ -141,4 +168,5 @@ def test_source_replay_twice_and_logged_failure(
         f"segments={len(panel.catalog)}",
         f"ex_cpi={len(resolved_ex_cpi)}",
         f"ex_cpi_rates={len(special_rate_checks)}",
+        f"january_snapshot={january_snapshot.version_id}",
     )
