@@ -27,8 +27,12 @@ def _row(version: str, reason: str, superseded: str) -> str:
     )
 
 
+def _page(*rows: str) -> str:
+    return "<table>" + "".join(rows) + "</table>"
+
+
 def test_snapshot_index_parses_version_url_date_and_reason() -> None:
-    page = "<table>" + _row("v130", "Scheduled update/revision", "25 March 2026 07:00") + "</table>"
+    page = _page(_row("v130", "Scheduled update/revision", "25 March 2026 07:00"))
 
     snapshots = parse_mm23_snapshot_index(page)
 
@@ -41,13 +45,11 @@ def test_snapshot_index_parses_version_url_date_and_reason() -> None:
 
 
 def test_january_regime_uses_scheduled_march_snapshot_not_same_day_correction() -> None:
-    page = "<table>" + "".join(
-        [
-            _row("v118", "Scheduled update/revision", "26 March 2025 07:00"),
-            _row("v130", "Scheduled update/revision", "25 March 2026 07:00"),
-            _row("v131", "Correction See correction", "25 March 2026 12:51"),
-        ]
-    ) + "</table>"
+    page = _page(
+        _row("v118", "Scheduled update/revision", "26 March 2025 07:00"),
+        _row("v130", "Scheduled update/revision", "25 March 2026 07:00"),
+        _row("v131", "Correction See correction", "25 March 2026 12:51"),
+    )
 
     selected = january_regime_snapshots(parse_mm23_snapshot_index(page))
 
@@ -57,12 +59,10 @@ def test_january_regime_uses_scheduled_march_snapshot_not_same_day_correction() 
 
 
 def test_january_regime_ignores_pre_double_update_years() -> None:
-    page = "<table>" + "".join(
-        [
-            _row("v1", "Scheduled update/revision", "23 March 2016 07:00"),
-            _row("v2", "Scheduled update/revision", "21 March 2017 07:00"),
-        ]
-    ) + "</table>"
+    page = _page(
+        _row("v1", "Scheduled update/revision", "23 March 2016 07:00"),
+        _row("v2", "Scheduled update/revision", "21 March 2017 07:00"),
+    )
 
     selected = january_regime_snapshots(parse_mm23_snapshot_index(page))
 
@@ -70,19 +70,17 @@ def test_january_regime_ignores_pre_double_update_years() -> None:
 
 
 def test_january_regime_rejects_two_scheduled_march_snapshots_for_one_year() -> None:
-    page = "<table>" + "".join(
-        [
-            _row("v130", "Scheduled update/revision", "25 March 2026 07:00"),
-            _row("v131", "Scheduled update/revision", "25 March 2026 12:51"),
-        ]
-    ) + "</table>"
+    page = _page(
+        _row("v130", "Scheduled update/revision", "25 March 2026 07:00"),
+        _row("v131", "Scheduled update/revision", "25 March 2026 12:51"),
+    )
 
     with pytest.raises(ValueError, match="Two scheduled March MM23 snapshots found for 2026"):
         january_regime_snapshots(parse_mm23_snapshot_index(page))
 
 
 def test_snapshot_index_fails_loudly_when_layout_has_no_versioned_csv() -> None:
-    page = "<table><tr><td>No archived files</td><td>25 March 2026 07:00</td></tr></table>"
+    page = _page("<tr><td>No archived files</td><td>25 March 2026 07:00</td></tr>")
 
     with pytest.raises(ValueError, match="no versioned CSV snapshots"):
         parse_mm23_snapshot_index(page)
