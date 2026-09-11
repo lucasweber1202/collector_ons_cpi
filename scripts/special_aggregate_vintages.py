@@ -1,22 +1,26 @@
-"""Discover archived MM23 snapshots needed for January special-aggregate weights.
+"""Discover MM23 snapshots and build source-backed special-weight regimes.
 
 From 2017 onward ONS uses two CPI higher-level weight updates each year. The
 current MM23 annual weight eventually represents the February-December regime.
 The final January-regime value is preserved in the MM23 version that is
-superseded by the scheduled March release. This module discovers those archived
-snapshots without persisting anything.
+superseded by the scheduled March release. Nothing in this module persists data.
 """
 
 from __future__ import annotations
 
 import html
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from html.parser import HTMLParser
 from urllib.parse import unquote, urljoin
 
-from scripts.special_aggregates import MM23SpecialPanel, parse_mm23_special_aggregates
+from scripts.special_aggregates import (
+    EX_CPI_SPECIAL_AGGREGATES,
+    MM23SpecialPanel,
+    parse_mm23_special_aggregates,
+)
 
 MM23_VERSIONS_URL = (
     "https://www.ons.gov.uk/economy/inflationandpriceindices/datasets/consumerpriceindices/"
@@ -148,6 +152,67 @@ def january_regime_snapshots(
             raise ValueError(f"Two scheduled March MM23 snapshots found for {year}")
         selected[year] = snapshot
     return selected
+
+
+def _exclusion_weights(panel: MM23SpecialPanel, year: int) -> dict[str, float]:
+    """Return every reviewed exclusion weight for one MM23 year or fail."""
+    values = panel.annual_weights.get(year)
+    if values is None:
+        raise ValueError(f"MM23 panel contains no annual weights for {year}")
+    weights: dict[str, float] = {}
+    for aggregate in EX_CPI_SPECIAL_AGGREGATES:
+        cdid = aggregate["weight_cdid"]
+        value = values.get(cdid)
+        if value is None:
+            raise ValueError(f"MM23 panel has no {cdid} exclusion weight for {year}")
+        weights[cdid] = value
+    return weights
+
+
+def build_exclusion_weight_regimes(
+    current: MM23SpecialPanel,
+    current_release_date: date,
+    january_panels: Mapping[int, MM23SpecialPanel],
+    *,
+    start_year: int | None = None,
+) -> dict[date, dict[str, float]]:
+    """Expand published annual special weights onto only their valid CPI months.
+
+    Before 2017 one annual weight regime applies to all months. From 2017, the
+    January value comes from the final February-release snapshot and the final
+    annual value applies to February-December. During a live February release,
+    the current-year MM23 value is itself the January regime, so no future
+    February-December rows are invented before the second update is published.
+
+    For a historical double-update year, a missing January snapshot is an error
+    rather than a reason to reuse the later February-December value.
+    """
+    expanded: dict[date, dict[str, float]] = {}
+    years = sorted(current.annual_weights)
+    if start_year is not None:
+        years = [year for year in years if year >= start_year]
+    for year in years:
+        if year > current_release_date.year:
+            continue
+        current_weights = _exclusion_weights(current, year)
+        if year < DOUBLE_WEIGHT_START_YEAR:
+            for month in range(1, 13):
+                expanded[date(year, month, 1)] = dict(current_weights)
+            continue
+
+        if year == current_release_date.year and current_release_date.month < 2:
+            continue
+        if year == current_release_date.year and current_release_date.month == 2:
+            expanded[date(year, 1, 1)] = dict(current_weights)
+            continue
+
+        january_panel = january_panels.get(year)
+        if january_panel is None:
+            raise ValueError(f"Missing archived January MM23 weight panel for {year}")
+        expanded[date(year, 1, 1)] = _exclusion_weights(january_panel, year)
+        for month in range(2, 13):
+            expanded[date(year, month, 1)] = dict(current_weights)
+    return expanded
 
 
 def discover_mm23_snapshots() -> list[MM23Snapshot]:
