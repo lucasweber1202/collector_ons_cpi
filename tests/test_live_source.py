@@ -16,7 +16,12 @@ from sqlalchemy.engine import Engine
 
 import main
 from scripts import extract, segments
-from scripts.special_aggregates import EX_CPI_SPECIAL_AGGREGATES, resolve_table38_alt_series
+from scripts.special_aggregates import (
+    EX_CPI_SPECIAL_AGGREGATES,
+    collect_mm23_special_aggregates,
+    complement_weight_checks,
+    resolve_table38_alt_series,
+)
 
 
 @pytest.mark.skipif(os.getenv("ONS_LIVE_TEST") != "1", reason="explicit live-source opt-in")
@@ -35,6 +40,15 @@ def test_source_replay_twice_and_logged_failure(
     assert set(resolved_ex_cpi) == {
         row["index_cdid"] for row in EX_CPI_SPECIAL_AGGREGATES
     }
+
+    # MM23 is validation-only at this stage: prove the reviewed columns still
+    # exist and that each latest exclusion weight reconciles with the official
+    # removed-component weight. Nothing from this panel is persisted here.
+    mm23 = collect_mm23_special_aggregates()
+    special_weight_checks = complement_weight_checks(mm23, latest_only=True)
+    assert len(special_weight_checks) == len(EX_CPI_SPECIAL_AGGREGATES)
+    failed_special_weights = [check for check in special_weight_checks if not check["passed"]]
+    assert not failed_special_weights, f"MM23 complement weights do not sum to 1000: {failed_special_weights}"
 
     weight_codes = [fields["code"] for fields in extract.get_original_weight_catalog().values()]
     panel = segments.collect_segments(date(1988, 1, 1), catalog, weight_codes)
@@ -109,4 +123,5 @@ def test_source_replay_twice_and_logged_failure(
         max(observations),
         {table: len(rows) for table, rows in first.items()},
         f"segments={len(panel.catalog)}",
+        f"ex_cpi={len(resolved_ex_cpi)}",
     )
