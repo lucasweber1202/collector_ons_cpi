@@ -16,6 +16,7 @@ from sqlalchemy.engine import Engine
 
 import main
 from scripts import extract, segments
+from scripts.special_aggregates import EX_CPI_SPECIAL_AGGREGATES, resolve_table38_alt_series
 
 
 @pytest.mark.skipif(os.getenv("ONS_LIVE_TEST") != "1", reason="explicit live-source opt-in")
@@ -25,6 +26,16 @@ def test_source_replay_twice_and_logged_failure(
     observations = extract.collect_raw_data(date(1988, 1, 1))
     basket = extract.collect_weights(date(2008, 1, 1))
     catalog = extract.get_series_catalog()
+
+    # The ex-CPI layer is a reviewed MM23 identity map onto the Table 38 ALT
+    # series already collected here. A missing CDID means ONS scope changed and
+    # must be reviewed instead of silently creating or fuzzy-matching a series.
+    resolved_ex_cpi, missing_ex_cpi = resolve_table38_alt_series(catalog)
+    assert not missing_ex_cpi, f"MM23 ex-CPI CDIDs missing from Table 38 ALT: {missing_ex_cpi}"
+    assert set(resolved_ex_cpi) == {
+        row["index_cdid"] for row in EX_CPI_SPECIAL_AGGREGATES
+    }
+
     weight_codes = [fields["code"] for fields in extract.get_original_weight_catalog().values()]
     panel = segments.collect_segments(date(1988, 1, 1), catalog, weight_codes)
 
