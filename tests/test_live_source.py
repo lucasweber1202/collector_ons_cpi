@@ -25,6 +25,7 @@ from scripts.special_aggregate_vintages import (
 )
 from scripts.special_aggregates import (
     EX_CPI_SPECIAL_AGGREGATES,
+    MM23SpecialPanel,
     collect_mm23_special_aggregates,
     complement_weight_checks,
     resolve_table38_alt_series,
@@ -79,7 +80,7 @@ def test_source_replay_twice_and_logged_failure(
     # that archive does not exist yet because the current MM23 file *is* the
     # January regime. The test handles both legitimate states explicitly.
     weight_year = max(mm23.annual_weights)
-    january_panels: dict[int, object] = {}
+    january_panels: dict[int, MM23SpecialPanel] = {}
     january_snapshot_id = "current-February-release"
     archived = january_regime_snapshots(discover_mm23_snapshots())
     if weight_year in archived:
@@ -102,13 +103,10 @@ def test_source_replay_twice_and_logged_failure(
     else:
         assert release_date.year == weight_year and release_date.month == 2
 
-    typed_january_panels = {
-        year: panel for year, panel in january_panels.items() if hasattr(panel, "annual_weights")
-    }
     special_weight_regimes = build_exclusion_weight_regimes(
         mm23,
         release_date,
-        typed_january_panels,  # type: ignore[arg-type]
+        january_panels,
         start_year=weight_year,
     )
     assert date(weight_year, 1, 1) in special_weight_regimes
