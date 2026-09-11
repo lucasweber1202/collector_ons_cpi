@@ -1,6 +1,6 @@
 # UK CPI ex-CPI / special aggregates mapping
 
-Status: the first exclusion set is mapped and has a validation-only MM23 reader. MM23 annual weights are intentionally **not persisted** yet.
+Status: the first exclusion set is mapped and has validation-only MM23 weight and 12-month-rate checks. MM23 annual weights are intentionally **not persisted** yet.
 
 ## Why this stays in `collector_ons_cpi`
 
@@ -30,7 +30,7 @@ Current ONS methodology: above consumption-segment level CPI/CPIH use December-r
 | CPI excluding housing, water, electricity, gas and other fuels | `A9G2` | `DKD4` | `DKP6` | `CHZU` | `D7BX` | `D7GB` |
 | CPI excluding education, health and social protection | `A9G3` | `DKD5` | `DKP7` | `A9G7` | `DKD9` | `DKQ3` |
 
-The code representation is `scripts/special_aggregates.py`. Joins are exact on the native ONS CDID. Names are descriptive only and are never fuzzy mapping keys.
+The identity map and MM23 parser live in `scripts/special_aggregates.py`. Joins are exact on the native ONS CDID. Names are descriptive only and are never fuzzy mapping keys. Cross-source Table 38 -> MM23 rate reconciliation lives in `scripts/special_aggregate_rates.py`.
 
 ## What is implemented on this branch
 
@@ -38,7 +38,7 @@ The code representation is `scripts/special_aggregates.py`. Joins are exact on t
 
 `resolve_table38_alt_series()` maps each reviewed exclusion index CDID onto an already-collected Table 38 `ALT` series. It accepts only `family == ALT`, rejects duplicate native CDIDs and reports missing targets instead of fabricating a fallback.
 
-The opt-in live-source replay now requires all ten reviewed index CDIDs to resolve against the current Table 38 source.
+The opt-in live-source replay requires all ten reviewed index CDIDs to resolve against the current Table 38 source.
 
 ### MM23 parser
 
@@ -65,15 +65,17 @@ sum  = 1000.0000
 
 The live-source test checks the latest common annual observation for all ten pairs. This is stronger than reconstructing membership from series names.
 
-## 12-month rate validation to add next
+### Published 12-month-rate validation
 
-For a monthly Table 38 exclusion index `I`, calculate:
+`published_12m_rate_checks()` takes the already-collected Table 38 `ALT` levels and calculates, for every reviewed exclusion aggregate:
 
 ```text
 100 * (I[t] / I[t-12] - 1)
 ```
 
-and compare it with the related MM23 published rate CDID (`DKO8` for core, for example). MM23 rates are a validation source, not a second stored copy unless the modelling requirement explicitly asks for rate series.
+It then compares that value with the related MM23 published 12-month-rate CDID (`DKO8` for core, for example). The default tolerance is 0.10 percentage point to accommodate the published rate rounding while Table 38 carries analytical levels to three decimals.
+
+The unit tests cover all ten aggregates, a deliberately wrong MM23 rate, a missing Table 38 target and latest-month selection. The opt-in live-source replay checks the latest common month for all ten aggregates. MM23 rates remain validation-only and are not stored as duplicate time series.
 
 ## Unresolved storage question: annual MM23 weights
 
@@ -96,7 +98,7 @@ Until that relationship is source-verified:
 
 ## Remaining implementation tasks
 
-1. Add Table 38 index -> MM23 published 12-month-rate validation and measure residuals on the live source.
+1. Run the full local verification loop and the opt-in live-source replay on this branch, recording the measured MM23 rate residuals.
 2. Investigate the annual special-aggregate weight's exact relationship to the ONS December/January double-weight regimes.
 3. Decide, based on that evidence, whether MM23 annual weights belong in `original_weights` or should remain validation-only.
 4. Only if persistence is justified, integrate the MM23 layer into `main.py`, logging and audit export with the same fail-before-write discipline as the existing bottom-up checks.
