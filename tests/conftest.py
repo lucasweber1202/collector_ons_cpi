@@ -188,3 +188,66 @@ def default_table38_series() -> list[tuple[str, str, str]]:
         for index in range(extract.TABLE38_MIN_SERIES)
     ]
     return series
+
+
+# SQLAlchemy renders an expanding IN list only at execution time; stringifying it
+# leaves this marker. The inventory below substitutes a concrete two-element list
+# so the statement can be parsed, which is the expansion SQLAlchemy itself emits.
+_POSTCOMPILE = "(__[POSTCOMPILE_series_ids])"
+_EXPANDED_IN = "(:series_ids_1, :series_ids_2)"
+
+
+def emitted_sql() -> dict[str, str]:
+    """Return every SQL statement the collector sends, keyed by a readable name.
+
+    One inventory keeps the portability checks and the Spark-grammar check
+    covering exactly the same statements, so a new query cannot be added to the
+    collector and reviewed by neither.
+    """
+    from scripts import export_validation_xlsx as export
+    from scripts import init_db, metadata, original_weights, run_logs, time_series, weights
+    from scripts.config import (
+        METADATA_TABLE,
+        ORIGINAL_WEIGHTS_TABLE,
+        TIME_SERIES_TABLE,
+        WEIGHTS_TABLE,
+    )
+
+    double = init_db.double_type("databricks")
+    statements: dict[str, str] = {
+        "ddl.schema": init_db.CREATE_SCHEMA,
+        "ddl.metadata": init_db.CREATE_METADATA_TABLE,
+        "ddl.time_series": init_db.CREATE_TIME_SERIES_TABLE.format(double=double),
+        "ddl.weights": init_db.CREATE_WEIGHTS_TABLE.format(double=double),
+        "ddl.original_weights": init_db.CREATE_ORIGINAL_WEIGHTS_TABLE.format(double=double),
+        "ddl.logs": init_db.CREATE_LOGS_TABLE,
+        "time_series.max_reference": str(time_series._MAX_REFERENCE_SQL),
+        "time_series.aggregates": str(time_series._AGGREGATES_SQL),
+        "time_series.latest": str(time_series._LATEST_SQL).replace(_POSTCOMPILE, _EXPANDED_IN),
+        "weights.latest": str(weights._LATEST_SQL),
+        "weights.legacy_guard": str(weights._LEGACY_GUARD_SQL),
+        "original_weights.latest": str(original_weights._LATEST_SQL),
+        "metadata.select": str(metadata._SELECT_SQL),
+        "metadata.legacy_guard": str(metadata.legacy_identifier_sql(f"{SCHEMA}.{METADATA_TABLE}")),
+        "logs.insert": str(run_logs._INSERT_SQL),
+    }
+    for module, label in (
+        (time_series, "time_series"),
+        (weights, "weights"),
+        (original_weights, "original_weights"),
+        (metadata, "metadata"),
+    ):
+        statements[f"{label}.insert"] = str(module._insert_statement(2))
+        statements[f"{label}.merge"] = str(module._merge_statement(2))
+        statements[f"{label}.update"] = str(module._UPDATE_SQL)
+    for table in (TIME_SERIES_TABLE, WEIGHTS_TABLE, ORIGINAL_WEIGHTS_TABLE):
+        column = "value" if table == TIME_SERIES_TABLE else "weight"
+        statements[f"export.latest.{table}"] = export._LATEST_VINTAGE_SQL.format(
+            value_column=column, schema=SCHEMA, table=table
+        )
+    statements["export.metadata"] = (
+        f"SELECT series_id, name, description, country, frequency, unit, first_observation, "
+        f"last_observation, observation_count, eco_group, source_url, last_publish_date "
+        f"FROM {SCHEMA}.{METADATA_TABLE} ORDER BY series_id"
+    )
+    return statements

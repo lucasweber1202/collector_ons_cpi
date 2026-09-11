@@ -88,4 +88,4 @@ def test_current_rows_pass_the_guard(engine: Engine, series_id: str) -> None:
     _seed(engine, "metadata", series_id)
     _seed(engine, "time_series", series_id)
     with engine.begin() as conn:
-        assert_current_series_ids(conn) is None
+        assert_current_series_ids(conn)  # must not raise

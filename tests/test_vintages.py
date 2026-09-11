@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime
 
 import pytest
@@ -24,7 +25,12 @@ LATER = datetime(2026, 8, 20)  # noqa: DTZ001
         ("weights", "weight", upsert_weights),
     ],
 )
-def test_revision_history(engine: Engine, table: str, column: str, upsert) -> None:
+def test_revision_history(
+    engine: Engine,
+    table: str,
+    column: str,
+    upsert: Callable[..., tuple[int, int]],
+) -> None:
     for values, collected_at, expected in (
         ({"S": 0.1}, FIRST, (1, 0)),
         ({"S": 0.2}, FIRST, (0, 0)),

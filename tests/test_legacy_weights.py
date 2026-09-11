@@ -30,4 +30,4 @@ def test_operational_shares_pass_the_guard(engine: Engine) -> None:
             datetime(2026, 8, 19),  # noqa: DTZ001
         )
     with engine.begin() as conn:
-        assert weights.assert_operational_storage(conn) is None
+        weights.assert_operational_storage(conn)  # must not raise

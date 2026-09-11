@@ -72,7 +72,9 @@ def test_segments_reconstruct_their_published_parent_exactly() -> None:
 def test_a_material_mismatch_is_flagged() -> None:
     months = [MARCH, APRIL]
     observations = _panel({MARCH: (100.0, 100.0), APRIL: (100.0, 100.0)})
-    observations[APRIL][PARENT] = float(observations[MARCH][PARENT]) * 1.05
+    march_parent = observations[MARCH][PARENT]
+    assert march_parent is not None
+    observations[APRIL][PARENT] = march_parent * 1.05
     results, _ = validate_segment_bottom_up(
         observations, _weights(months), _hierarchy(months), tolerance_pp=0.5
     )

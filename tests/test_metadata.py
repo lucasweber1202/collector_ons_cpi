@@ -100,7 +100,7 @@ def test_history_columns_come_from_the_database_not_the_extraction_window(
     with engine.begin() as conn:
         upsert_time_series(conn, history, COLLECTED_AT)
         metadata.upsert_metadata(conn, history, COLLECTED_AT, CATALOG)
-    rewind = {date(2026, 7, 1): {DIVISION: 2126.0}}
+    rewind: dict[date, dict[str, float | None]] = {date(2026, 7, 1): {DIVISION: 2126.0}}
     with engine.begin() as conn:
         assert metadata.upsert_metadata(conn, rewind, COLLECTED_AT, CATALOG) == (0, 0)
     with engine.connect() as conn:
