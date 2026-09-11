@@ -59,6 +59,21 @@ _LEVEL_LABELS = {
 }
 
 
+def legacy_identifier_sql(table: str) -> TextClause:
+    """Count rows still using the superseded name-bearing identifier spelling.
+
+    The old spelling appended the official name, so it always carries more than
+    the three underscores of ``CPI_{family}_{node}_{native_id}``.
+    """
+    return text(
+        f"SELECT COUNT(*) FROM {table} WHERE series_id LIKE 'CPI%' "
+        "AND LENGTH(series_id) - LENGTH(REPLACE(series_id, '_', '')) > 3"
+    )
+
+
+_SELECT_SQL = text(f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE}")
+
+
 def assert_current_series_ids(conn: Connection) -> None:
     """Refuse to mix pre-migration name-bearing identifiers with stable ones.
 
@@ -69,12 +84,7 @@ def assert_current_series_ids(conn: Connection) -> None:
     holding the old spelling stops the run and is migrated deliberately.
     """
     for table in (_TABLE, _TIME_SERIES):
-        legacy = conn.execute(
-            text(
-                f"SELECT COUNT(*) FROM {table} WHERE series_id LIKE 'CPI%' "
-                "AND LENGTH(series_id) - LENGTH(REPLACE(series_id, '_', '')) > 3"
-            )
-        ).scalar_one()
+        legacy = conn.execute(legacy_identifier_sql(table)).scalar_one()
         if legacy:
             raise ValueError(
                 f"{table} holds {legacy} rows using the superseded name-bearing series_id "

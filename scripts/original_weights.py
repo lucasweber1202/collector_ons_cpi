@@ -90,17 +90,18 @@ def _write_batches(
         )
 
 
+_LATEST_SQL = text(
+    f"""SELECT series_id, reference_date, vintage_date, weight, weight_base_year, collected_at
+    FROM (SELECT series_id, reference_date, vintage_date, weight, weight_base_year, collected_at,
+    ROW_NUMBER() OVER (PARTITION BY series_id, reference_date
+    ORDER BY vintage_date DESC, collected_at DESC) AS rn
+    FROM {_TABLE} WHERE reference_date >= :minimum_date) ranked WHERE rn = 1"""
+)
+
+
 def _latest(conn: Connection, minimum_date: date) -> dict[tuple[str, date], dict[str, Any]]:
-    sql = text(
-        f"""SELECT series_id, reference_date, vintage_date, weight, weight_base_year,
-        collected_at
-        FROM (SELECT series_id, reference_date, vintage_date, weight, weight_base_year,
-        collected_at,
-        ROW_NUMBER() OVER (PARTITION BY series_id, reference_date
-        ORDER BY vintage_date DESC, collected_at DESC) AS rn
-        FROM {_TABLE} WHERE reference_date >= :minimum_date) ranked WHERE rn = 1"""
-    )
-    rows = conn.execute(sql, {"minimum_date": minimum_date}).mappings().all()
+    """Fetch the latest stored vintage per series and month."""
+    rows = conn.execute(_LATEST_SQL, {"minimum_date": minimum_date}).mappings().all()
     result: dict[tuple[str, date], dict[str, Any]] = {}
     for row in rows:
         ref = (

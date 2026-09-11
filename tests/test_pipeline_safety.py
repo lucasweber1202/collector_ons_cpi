@@ -132,3 +132,55 @@ def test_an_empty_segment_window_does_not_fake_a_pass(
 
 def test_extraction_includes_december_for_january_chain() -> None:
     assert main._anchor_to_january(date(2026, 7, 1)) == date(2025, 12, 1)
+
+
+def test_both_weight_products_are_stamped_with_their_own_regime_year() -> None:
+    """W1 labels a calendar year; a segment basket runs February to January."""
+    january, february = date(2026, 1, 1), date(2026, 2, 1)
+    rows = main._original_weight_rows(
+        {january: {"CPI_W1_0": 1000.0}, february: {"CPI_W1_0": 1000.0}},
+        {january: {"CPI_CS_SEG_220107": 7.691}, february: {"CPI_CS_SEG_220107": 7.775}},
+    )
+    stamped = {(row["series_id"], row["reference_date"]): row["weight_base_year"] for row in rows}
+    assert stamped[("CPI_W1_0", january)] == 2026
+    assert stamped[("CPI_CS_SEG_220107", january)] == 2025
+    assert stamped[("CPI_CS_SEG_220107", february)] == 2026
+
+
+def test_one_series_cannot_carry_two_official_weights_in_a_month() -> None:
+    month = date(2026, 2, 1)
+    with pytest.raises(ValueError, match="same series and month"):
+        main._original_weight_rows({month: {"CPI_W1_0": 1.0}}, {month: {"CPI_W1_0": 2.0}})
+
+
+def test_a_series_published_by_two_layers_is_refused() -> None:
+    month = date(2026, 2, 1)
+    with pytest.raises(ValueError, match="published by two ONS layers"):
+        main._merge_observations({month: {PARENT: 100.0}}, {month: {PARENT: 101.0}})
+
+
+def test_a_series_cannot_carry_two_operational_weights() -> None:
+    month = date(2026, 2, 1)
+    with pytest.raises(ValueError, match="two operational weights"):
+        main._merge_weights({month: {PARENT: 1.0}}, {month: {PARENT: 0.5}})
+
+
+def test_a_lagging_segment_dataset_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    """A CPI release can land before its consumption-segment edition."""
+    parsed: dict[date, dict[str, float | None]] = {date(2026, 8, 1): {PARENT: 100.0}}
+    segments = {date(2026, 7, 1): {"CPI_CS_SEG_220107": 103.0}}
+
+    with caplog.at_level("WARNING", logger="main"):
+        main._log_segment_lag(parsed, segments)
+
+    assert any("trail the CPI release by 1 month" in r.getMessage() for r in caplog.records)
+
+
+def test_an_aligned_segment_dataset_is_silent(caplog: pytest.LogCaptureFixture) -> None:
+    parsed: dict[date, dict[str, float | None]] = {date(2026, 7, 1): {PARENT: 100.0}}
+    segments = {date(2026, 7, 1): {"CPI_CS_SEG_220107": 103.0}}
+
+    with caplog.at_level("WARNING", logger="main"):
+        main._log_segment_lag(parsed, segments)
+
+    assert not caplog.records

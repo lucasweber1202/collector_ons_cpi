@@ -47,6 +47,20 @@ SKIP_SEGMENT_COMPOSITION = "segment set changed between the two months"
 UNRECONCILABLE_AT_SOURCE = frozenset({SKIP_OUTSIDE_WEIGHTS_WINDOW, SKIP_SEGMENT_CHAIN_LINK})
 
 
+def _observed(values: dict[str, float | None], series_id: str) -> float:
+    """Return a level the caller's guard has already proven usable.
+
+    Every arithmetic site below runs after a guard that excludes missing and
+    zero levels. Reading through this helper states that invariant once, and
+    turns a silent None leaking into the arithmetic into an immediate error
+    rather than a nonsensical residual.
+    """
+    value = values.get(series_id)
+    if value is None:
+        raise ValueError(f"{series_id} has no usable observation at this point")
+    return float(value)
+
+
 def build_hierarchy(catalog: dict[str, dict[str, str]]) -> dict[str, list[str]]:
     """Build the parent-to-immediate-children map from verified upstream fields.
 
@@ -171,7 +185,7 @@ def validate_bottom_up(
         for parent, children in hierarchy.items():
             parent_now = current.get(parent)
             parent_before = previous.get(parent)
-            if parent_now is None or parent_before in (None, 0):
+            if parent_now is None or parent_before is None or parent_before == 0:
                 skips[SKIP_PARENT_WITHOUT_OBSERVATION] += 1
                 continue
             usable = [
@@ -196,7 +210,7 @@ def validate_bottom_up(
                 child: (
                     weights[child]
                     if operational
-                    else weights[child] * float(previous[child]) / float(reference[child])
+                    else weights[child] * _observed(previous, child) / _observed(reference, child)
                 )
                 for child in usable
             }
@@ -205,7 +219,8 @@ def validate_bottom_up(
                 skips[SKIP_ZERO_WEIGHT_TOTAL] += 1
                 continue
             reconstructed_relative = sum(
-                updated[child] * float(current[child]) / float(previous[child]) for child in usable
+                updated[child] * _observed(current, child) / _observed(previous, child)
+                for child in usable
             ) / (1.0 if operational else weight_total)
             published_relative = float(parent_now) / float(parent_before)
             residual_pp = (reconstructed_relative - published_relative) * 100.0
@@ -257,7 +272,7 @@ def derive_operational_weights(
             ):
                 continue
             updated = {
-                child: official[child] * float(previous[child]) / float(reference[child])
+                child: official[child] * _observed(previous, child) / _observed(reference, child)
                 for child in children
             }
             if any(not math.isfinite(value) or value < 0 for value in updated.values()):
@@ -362,7 +377,7 @@ def validate_segment_bottom_up(
         for parent, children in parents.items():
             parent_now = current.get(parent)
             parent_before = previous.get(parent)
-            if parent_now is None or parent_before in (None, 0):
+            if parent_now is None or parent_before is None or parent_before == 0:
                 skips[SKIP_PARENT_WITHOUT_OBSERVATION] += 1
                 continue
             if set(children) != set(hierarchy[previous_date].get(parent, [])):
@@ -377,7 +392,9 @@ def validate_segment_bottom_up(
                 skips[SKIP_CHILD_WITHOUT_OBSERVATION] += 1
                 continue
             updated = {
-                child: (weights[child] if operational else weights[child] * float(previous[child]))
+                child: (
+                    weights[child] if operational else weights[child] * _observed(previous, child)
+                )
                 for child in children
             }
             weight_total = sum(updated.values())
@@ -385,7 +402,7 @@ def validate_segment_bottom_up(
                 skips[SKIP_ZERO_WEIGHT_TOTAL] += 1
                 continue
             reconstructed_relative = sum(
-                updated[child] * float(current[child]) / float(previous[child])
+                updated[child] * _observed(current, child) / _observed(previous, child)
                 for child in children
             ) / (1.0 if operational else weight_total)
             published_relative = float(parent_now) / float(parent_before)
@@ -428,7 +445,7 @@ def derive_segment_operational_weights(
         for children in parents.values():
             if any(child not in weights or previous.get(child) in (None, 0) for child in children):
                 continue
-            updated = {child: weights[child] * float(previous[child]) for child in children}
+            updated = {child: weights[child] * _observed(previous, child) for child in children}
             if any(not math.isfinite(value) or value < 0 for value in updated.values()):
                 raise ValueError(f"Invalid segment operational weights at {month}")
             total = sum(updated.values())

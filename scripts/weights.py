@@ -16,11 +16,12 @@ logger = logging.getLogger(__name__)
 _TABLE = f"{SCHEMA_NAME}.{WEIGHTS_TABLE}"
 
 
+_LEGACY_GUARD_SQL = text(f"SELECT COUNT(*) FROM {_TABLE} WHERE weight > 1 OR weight < 0")
+
+
 def assert_operational_storage(conn: Connection) -> None:
     """Refuse to mix legacy baskets in parts per thousand with local shares."""
-    legacy = conn.execute(
-        text(f"SELECT COUNT(*) FROM {_TABLE} WHERE weight > 1 OR weight < 0")
-    ).scalar_one()
+    legacy = conn.execute(_LEGACY_GUARD_SQL).scalar_one()
     if legacy:
         raise ValueError(
             "weights contains legacy basket points; archive/rebuild this table "
@@ -97,15 +98,18 @@ def _write_batches(
         )
 
 
+_LATEST_SQL = text(
+    f"""SELECT series_id, reference_date, vintage_date, weight, collected_at
+    FROM (SELECT series_id, reference_date, vintage_date, weight, collected_at,
+    ROW_NUMBER() OVER (PARTITION BY series_id, reference_date
+    ORDER BY vintage_date DESC, collected_at DESC) AS rn
+    FROM {_TABLE} WHERE reference_date >= :minimum_date) ranked WHERE rn = 1"""
+)
+
+
 def _latest(conn: Connection, minimum_date: date) -> dict[tuple[str, date], dict[str, Any]]:
-    sql = text(
-        f"""SELECT series_id, reference_date, vintage_date, weight, collected_at
-        FROM (SELECT series_id, reference_date, vintage_date, weight, collected_at,
-        ROW_NUMBER() OVER (PARTITION BY series_id, reference_date
-        ORDER BY vintage_date DESC, collected_at DESC) AS rn
-        FROM {_TABLE} WHERE reference_date >= :minimum_date) ranked WHERE rn = 1"""
-    )
-    rows = conn.execute(sql, {"minimum_date": minimum_date}).mappings().all()
+    """Fetch the latest stored vintage per series and month."""
+    rows = conn.execute(_LATEST_SQL, {"minimum_date": minimum_date}).mappings().all()
     result: dict[tuple[str, date], dict[str, Any]] = {}
     for row in rows:
         ref = (

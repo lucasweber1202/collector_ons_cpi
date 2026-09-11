@@ -15,6 +15,12 @@ _TABLE = f"{SCHEMA_NAME}.{LOGS_TABLE}"
 _MAX_TEXT = 65535
 
 
+_INSERT_SQL = text(
+    f"INSERT INTO {_TABLE} (started_at, finished_at, status, log_text, traceback) "
+    "VALUES (:started_at, :finished_at, :status, :log_text, :traceback)"
+)
+
+
 def _truncate(value: str | None) -> str | None:
     """Bound text columns while making truncation visible."""
     if value is None or len(value) <= _MAX_TEXT:
@@ -35,11 +41,7 @@ def insert_run_log(
     try:
         with engine.begin() as conn:
             conn.execute(
-                text(
-                    f"INSERT INTO {_TABLE} "
-                    "(started_at, finished_at, status, log_text, traceback) "
-                    "VALUES (:started_at, :finished_at, :status, :log_text, :traceback)"
-                ),
+                _INSERT_SQL,
                 {
                     "started_at": started_at,
                     "finished_at": finished_at,

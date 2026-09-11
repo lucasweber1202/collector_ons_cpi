@@ -132,3 +132,21 @@ def test_segment_provenance_reaches_the_series_map(engine: Engine, tmp_path: Pat
     assert row["level"] == "consumption_segment"
     assert row["parent_series_id"] == "CPI_COICOP_C1111_D7EW"
     assert "research data" in row["provenance"]
+
+
+def test_an_empty_database_still_produces_every_sheet(engine: Engine, tmp_path: Path) -> None:
+    """A workbook must never silently omit a dataset just because it is empty."""
+    output = export_validation_xlsx(engine, {}, {}, [], tmp_path / "empty.xlsx", as_of=FIRST.date())
+    with pd.ExcelFile(output) as workbook:
+        assert {
+            "Run",
+            "Time Series",
+            "Weights",
+            "Original Weights",
+            "Series Map",
+            "Original Weight Map",
+            "Validation",
+        } == set(workbook.sheet_names)
+        run = pd.read_excel(workbook, "Run").set_index("property")["value"]
+        assert int(run["stored_observations"]) == 0
+        assert int(run["stored_metadata_rows"]) == 0

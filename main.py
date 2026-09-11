@@ -209,6 +209,32 @@ def _gate(
         problems.append(f"{label}: coverage {coverage:.4f} below {MIN_VALIDATION_COVERAGE:.4f}")
 
 
+def _log_segment_lag(
+    parsed: dict[date, dict[str, float | None]], segments: dict[date, dict[str, float]]
+) -> None:
+    """Report how far the segment dataset trails the CPI release, if at all.
+
+    The two products are published on their own schedules, so a CPI release can
+    arrive before its consumption-segment edition. That is a normal, recoverable
+    state -- the next run's revision rewind collects the missing month -- but it
+    is worth saying out loud rather than leaving an operator to compare two
+    other log lines.
+    """
+    if not parsed or not segments:
+        return
+    lag = (max(parsed).year * 12 + max(parsed).month) - (
+        max(segments).year * 12 + max(segments).month
+    )
+    if lag > 0:
+        logger.warning(
+            "Consumption segments trail the CPI release by %d month(s): Table 38 to %s, "
+            "segments to %s; the next run's rewind collects the gap",
+            lag,
+            max(parsed),
+            max(segments),
+        )
+
+
 def _collect_segment_panel(start_date: date, catalog: dict[str, dict[str, str]]) -> SegmentPanel:
     """Collect consumption segments against the official weight classification codes."""
     weight_codes = [fields["code"] for fields in get_original_weight_catalog().values()]
@@ -318,6 +344,7 @@ def _collect(args: argparse.Namespace, engine: Engine) -> int:
     segments_expected = max(observations) >= SEGMENT_FIRST_MONTH if observations else False
     if segments_expected and not segments.observations:
         problems.append("consumption segments: no published edition was collected in this window")
+    _log_segment_lag(parsed, segments.observations)
     segment_weight_checks, segment_weight_skips = validate_segment_weight_sums(
         segments.official_weights, basket, segments.hierarchy
     )

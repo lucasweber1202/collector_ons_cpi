@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from datetime import date
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -34,20 +35,23 @@ def test_source_replay_twice_and_logged_failure(
     monkeypatch.setattr(main, "collect_weights", lambda _start: basket)
     monkeypatch.setattr(main, "collect_segments", lambda *_args: panel)
 
-    def snapshot() -> dict[str, list[tuple]]:
+    def snapshot() -> dict[str, list[tuple[Any, ...]]]:
+        """Read every persisted row so a rerun can be compared field by field."""
+        ordering = {
+            "time_series": "series_id, reference_date, vintage_date",
+            "weights": "series_id, reference_date, vintage_date",
+            "original_weights": "series_id, reference_date, vintage_date",
+            "metadata": "series_id",
+        }
         with engine.connect() as conn:
             return {
-                table: conn.execute(
-                    text(
-                        f"SELECT * FROM collector_ons_cpi.{table} "
-                        "ORDER BY series_id, reference_date"
-                    )
-                ).all()
-                for table in ("time_series", "weights", "original_weights")
-            } | {
-                "metadata": conn.execute(
-                    text("SELECT * FROM collector_ons_cpi.metadata ORDER BY series_id")
-                ).all()
+                table: [
+                    tuple(row)
+                    for row in conn.execute(
+                        text(f"SELECT * FROM collector_ons_cpi.{table} ORDER BY {order}")
+                    ).all()
+                ]
+                for table, order in ordering.items()
             }
 
     assert main.run(["--no-watch"]) == 0
@@ -57,24 +61,22 @@ def test_source_replay_twice_and_logged_failure(
 
     stored_by_series: dict[str, dict[date, float]] = {}
     for series_id, reference_date, _vintage, value, _collected in first["time_series"]:
-        stored_by_series.setdefault(series_id, {})[reference_date] = value
-    source = {
-        **{
-            series_id: {
-                month: values[series_id]
-                for month, values in sorted(observations.items())
-                if values.get(series_id) is not None
-            }
-            for series_id in catalog
-        },
-        **{
-            series_id: {
-                month: values[series_id]
-                for month, values in sorted(panel.observations.items())
-                if series_id in values
-            }
-            for series_id in panel.catalog
-        },
+        stored_by_series.setdefault(str(series_id), {})[reference_date] = float(value)
+    source: dict[str, dict[date, float]] = {
+        series_id: {
+            month: float(value)
+            for month, values in sorted(observations.items())
+            if (value := values.get(series_id)) is not None
+        }
+        for series_id in catalog
+    }
+    source |= {
+        series_id: {
+            month: float(values[series_id])
+            for month, values in sorted(panel.observations.items())
+            if series_id in values
+        }
+        for series_id in panel.catalog
     }
     assert set(stored_by_series) == set(source)
     for series_id, published in source.items():
