@@ -18,6 +18,7 @@ from urllib.parse import unquote, urljoin
 
 from scripts.special_aggregates import (
     EX_CPI_SPECIAL_AGGREGATES,
+    MM23_DATASET_URL,
     MM23SpecialPanel,
     parse_mm23_special_aggregates,
     resolve_table38_alt_series,
@@ -28,6 +29,7 @@ MM23_VERSIONS_URL = (
     "current"
 )
 DOUBLE_WEIGHT_START_YEAR = 2017
+MM23_WEIGHT_DATASET = "ONS Consumer price inflation time series (MM23) special aggregate weights"
 
 
 @dataclass(frozen=True)
@@ -220,12 +222,11 @@ def map_exclusion_weight_regimes_to_table38(
     regimes: Mapping[date, Mapping[str, float]],
     catalog: Mapping[str, Mapping[str, str]],
 ) -> dict[date, dict[str, float]]:
-    """Map MM23 weight CDIDs onto the existing Table 38 ALT series identifiers.
+    """Map MM23 weight CDIDs onto their existing Table 38 ALT targets.
 
-    The MM23 weight CDID identifies the basket mass, while this collector stores
-    the corresponding analytical index under its Table 38 `CPI_ALT_*` series_id.
-    The reviewed crosswalk links those two native CDIDs. Resolution is exact on
-    the index CDID; no name matching and no new series identifier are introduced.
+    This target-ID view is useful for validation and joins. It is not the
+    preferred persistence identity for `original_weights`, which follows the W1
+    precedent and preserves the source weight identifier via `CPI_MM23_<CDID>`.
     """
     resolved, missing = resolve_table38_alt_series(catalog)
     if missing:
@@ -248,6 +249,57 @@ def map_exclusion_weight_regimes_to_table38(
             month_values[series_id] = value
         mapped[month] = month_values
     return mapped
+
+
+def mm23_original_weight_id(weight_cdid: str) -> str:
+    """Return the stable source identity used for a published MM23 weight."""
+    native = re.sub(r"[^A-Z0-9]+", "", weight_cdid.strip().upper())
+    if not native:
+        raise ValueError("MM23 weight CDID is empty")
+    return f"CPI_MM23_{native}"
+
+
+def build_mm23_original_weight_layer(
+    regimes: Mapping[date, Mapping[str, float]],
+    catalog: Mapping[str, Mapping[str, str]],
+) -> tuple[dict[date, dict[str, float]], dict[str, dict[str, str]]]:
+    """Build source-ID weights plus the audit crosswalk to Table 38 ALT series.
+
+    This mirrors W1 storage: the official source row keeps its own stable
+    identifier in `original_weights`, while `Original Weight Map` records the
+    exact Table 38 target. The native MM23 weight CDID therefore remains
+    auditable instead of being replaced by the related index CDID.
+    """
+    resolved, missing = resolve_table38_alt_series(catalog)
+    if missing:
+        raise ValueError(
+            f"Cannot build MM23 original weights; Table 38 ALT CDIDs missing: {missing}"
+        )
+    audit: dict[str, dict[str, str]] = {}
+    source_id_by_weight: dict[str, str] = {}
+    for aggregate in EX_CPI_SPECIAL_AGGREGATES:
+        weight_cdid = aggregate["weight_cdid"]
+        source_id = mm23_original_weight_id(weight_cdid)
+        source_id_by_weight[weight_cdid] = source_id
+        audit[source_id] = {
+            "code": weight_cdid,
+            "name": aggregate["label"],
+            "native_id": weight_cdid,
+            "mapped_series_id": resolved[aggregate["index_cdid"]],
+            "dataset": MM23_WEIGHT_DATASET,
+            "source_url": MM23_DATASET_URL,
+        }
+
+    originals: dict[date, dict[str, float]] = {}
+    for month, values in regimes.items():
+        month_values: dict[str, float] = {}
+        for weight_cdid, source_id in source_id_by_weight.items():
+            value = values.get(weight_cdid)
+            if value is None:
+                raise ValueError(f"Missing {weight_cdid} MM23 exclusion weight at {month}")
+            month_values[source_id] = value
+        originals[month] = month_values
+    return originals, audit
 
 
 def discover_mm23_snapshots() -> list[MM23Snapshot]:
