@@ -19,7 +19,8 @@ import logging
 import math
 import re
 import time
-from datetime import date
+from datetime import date, datetime
+from typing import SupportsFloat, SupportsIndex
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -352,6 +353,52 @@ def _latest_weights_url(page_html: str) -> str:
     return urljoin(WEIGHTS_PAGE_URL, html.unescape(best_href))
 
 
+# The spellings pandas uses for an empty cell. str() would turn each of them
+# into a plausible-looking label ("NaT", "<NA>"), so they are matched by identity.
+_MISSING = (None, pd.NaT, pd.NA)
+
+
+def cell_float(value: object) -> float | None:
+    """Return a finite float for one workbook cell, or None when it is not numeric.
+
+    A workbook cell is whatever the source put there: a number, the ONS ".."
+    not-available marker, a footnote, or an empty cell. Converting in one place
+    keeps "not a usable number" a single, testable decision instead of a
+    try/except repeated at every read site.
+    """
+    if any(value is missing for missing in _MISSING):
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+    if not isinstance(value, (SupportsFloat, SupportsIndex, str)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def cell_text(value: object) -> str | None:
+    """Return the trimmed text of a workbook cell, or None when it is empty."""
+    if any(value is missing for missing in _MISSING):
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def cell_month(value: object) -> date | None:
+    """Return the first day of the month a date cell refers to, or None."""
+    if not isinstance(value, (str, date, datetime)):
+        return None
+    try:
+        return pd.Timestamp(value).date().replace(day=1)
+    except (TypeError, ValueError):
+        return None
+
+
 def _excel_frame(blob: bytes, sheet_name: str) -> pd.DataFrame:
     """Read one workbook sheet without treating source rows as headers."""
     try:
@@ -438,13 +485,13 @@ def parse_cpi_workbook(
     column_ids: dict[int, str] = {}
     cdids: set[str] = set()
     for column in range(TABLE38_FIRST_SERIES_COLUMN, len(frame.columns)):
-        raw_code = frame.iat[TABLE38_CODE_ROW, column]
-        native = frame.iat[TABLE38_CDID_ROW, column]
-        name = frame.iat[TABLE38_NAME_ROW, column]
-        if pd.isna(raw_code) or pd.isna(native) or pd.isna(name):
+        raw_code = cell_text(frame.iat[TABLE38_CODE_ROW, column])
+        native = cell_text(frame.iat[TABLE38_CDID_ROW, column])
+        name = cell_text(frame.iat[TABLE38_NAME_ROW, column])
+        if raw_code is None or native is None or name is None:
             continue
         family, node, level = _node_token(raw_code)
-        native_id = str(native).strip().upper()
+        native_id = native.upper()
         series_id = make_series_id(family, node, native_id)
         if series_id in catalog:
             raise ValueError(f"Table 38 publishes {series_id} in two columns")
@@ -455,8 +502,8 @@ def parse_cpi_workbook(
             "node": node,
             "level": level,
             "native_id": native_id,
-            "name": str(name).strip(),
-            "classification": str(raw_code).strip(),
+            "name": name,
+            "classification": raw_code,
             "dataset": TABLE38_DATASET,
             "source_url": SOURCE_URL,
             "provenance": TABLE38_PROVENANCE,
@@ -466,28 +513,16 @@ def parse_cpi_workbook(
     parsed: dict[date, dict[str, float | None]] = {}
     months = 0
     for row in range(TABLE38_FIRST_DATA_ROW, len(frame.index)):
-        raw_date = frame.iat[row, TABLE38_DATE_COLUMN]
-        if pd.isna(raw_date):
-            continue
-        try:
-            ref_date = pd.Timestamp(raw_date).date().replace(day=1)
-        except (TypeError, ValueError):
+        ref_date = cell_month(frame.iat[row, TABLE38_DATE_COLUMN])
+        if ref_date is None:
             continue
         months += 1
         if start_date and ref_date < start_date.replace(day=1):
             continue
-        values: dict[str, float | None] = {}
-        for column, series_id in column_ids.items():
-            raw_value = frame.iat[row, column]
-            if pd.isna(raw_value):
-                values[series_id] = None
-                continue
-            try:
-                value = float(raw_value)
-            except (TypeError, ValueError):
-                values[series_id] = None
-                continue
-            values[series_id] = value if math.isfinite(value) else None
+        values: dict[str, float | None] = {
+            series_id: cell_float(frame.iat[row, column])
+            for column, series_id in column_ids.items()
+        }
         if values:
             parsed[ref_date] = values
 
@@ -617,11 +652,11 @@ def parse_weights_workbook(
         classified_rows += 1
         series_id = _match_weight_series(label[0], label[1], catalog)
         original_id = "CPI_W1_" + label[0].replace(".", "P").replace("/", "S")
-        raw_cdid = frame.iat[row, WEIGHTS_CDID_COLUMN]
+        raw_cdid = cell_text(frame.iat[row, WEIGHTS_CDID_COLUMN])
         original_catalog[original_id] = {
             "code": label[0],
             "name": label[1],
-            "native_id": "" if pd.isna(raw_cdid) else str(raw_cdid).strip().upper(),
+            "native_id": "" if raw_cdid is None else raw_cdid.upper(),
             "mapped_series_id": series_id or "",
             "dataset": W1_DATASET,
             "source_url": WEIGHTS_PAGE_URL,
@@ -651,12 +686,8 @@ def parse_weights_workbook(
         for column, header in headers.items():
             if header is None:
                 continue
-            raw_weight = frame.iat[row, column]
-            try:
-                weight = float(raw_weight)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(weight):
+            weight = cell_float(frame.iat[row, column])
+            if weight is None:
                 continue
             if weight < 0:
                 raise ValueError(f"Negative W1 weight: {label}")

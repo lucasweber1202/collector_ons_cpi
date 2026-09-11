@@ -87,10 +87,28 @@ def _write_batches(
         )
 
 
+_MAX_REFERENCE_SQL = text(f"SELECT MAX(reference_date) FROM {_TABLE}")
+_AGGREGATES_SQL = text(
+    f"""SELECT series_id, MIN(reference_date) AS first_observation,
+    MAX(reference_date) AS last_observation,
+    COUNT(DISTINCT reference_date) AS observation_count,
+    MAX(collected_at) AS last_collected_at
+    FROM {_TABLE} GROUP BY series_id"""
+)
+_LATEST_SQL = text(
+    f"""SELECT series_id, reference_date, vintage_date, value, collected_at
+    FROM (SELECT series_id, reference_date, vintage_date, value, collected_at,
+    ROW_NUMBER() OVER (PARTITION BY series_id, reference_date
+    ORDER BY vintage_date DESC, collected_at DESC) AS rn
+    FROM {_TABLE} WHERE reference_date >= :minimum_date AND series_id IN :series_ids) ranked
+    WHERE rn = 1"""
+).bindparams(bindparam("series_ids", expanding=True))
+
+
 def get_max_reference_date(engine: Engine) -> date | None:
     """Return the latest stored reference month."""
     with engine.connect() as conn:
-        value = conn.execute(text(f"SELECT MAX(reference_date) FROM {_TABLE}")).scalar()
+        value = conn.execute(_MAX_REFERENCE_SQL).scalar()
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, str):
@@ -100,14 +118,7 @@ def get_max_reference_date(engine: Engine) -> date | None:
 
 def get_series_aggregates(conn: Connection) -> dict[str, dict[str, Any]]:
     """Return per-series first, last, distinct count, and latest collection."""
-    sql = text(
-        f"""SELECT series_id, MIN(reference_date) AS first_observation,
-        MAX(reference_date) AS last_observation,
-        COUNT(DISTINCT reference_date) AS observation_count,
-        MAX(collected_at) AS last_collected_at
-        FROM {_TABLE} GROUP BY series_id"""
-    )
-    rows = conn.execute(sql).mappings().all()
+    rows = conn.execute(_AGGREGATES_SQL).mappings().all()
     return {str(row["series_id"]): dict(row) for row in rows}
 
 
@@ -138,16 +149,10 @@ def _latest(
     conn: Connection, series_ids: list[str], minimum_date: date
 ) -> dict[tuple[str, date], dict[str, Any]]:
     """Fetch latest vintages for a bounded series batch."""
-    sql = text(
-        f"""SELECT series_id, reference_date, vintage_date, value, collected_at
-        FROM (SELECT series_id, reference_date, vintage_date, value, collected_at,
-        ROW_NUMBER() OVER (PARTITION BY series_id, reference_date
-        ORDER BY vintage_date DESC, collected_at DESC) AS rn
-        FROM {_TABLE} WHERE reference_date >= :minimum_date AND series_id IN :series_ids) ranked
-        WHERE rn = 1"""
-    ).bindparams(bindparam("series_ids", expanding=True))
     rows = (
-        conn.execute(sql, {"minimum_date": minimum_date, "series_ids": series_ids}).mappings().all()
+        conn.execute(_LATEST_SQL, {"minimum_date": minimum_date, "series_ids": series_ids})
+        .mappings()
+        .all()
     )
     result: dict[tuple[str, date], dict[str, Any]] = {}
     for row in rows:

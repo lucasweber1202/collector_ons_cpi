@@ -399,8 +399,7 @@ def collect_segments(
         framework_urls = discover_framework_editions(page)
         months: dict[date, pd.DataFrame] = {}
         for position, (month, url) in enumerate(sorted(editions.items()), start=1):
-            if DOWNLOAD_DELAY:
-                time.sleep(DOWNLOAD_DELAY)
+            time.sleep(DOWNLOAD_DELAY)
             try:
                 blob = http_get(client, url).content
             except httpx.HTTPStatusError as exc:
@@ -423,12 +422,11 @@ def collect_segments(
         }
         frameworks: dict[int, pd.DataFrame] = {}
         for year in sorted(needed):
-            url = framework_urls.get(year)
-            if url is None:
+            framework_url = framework_urls.get(year)
+            if framework_url is None:
                 raise ValueError(f"ONS published no CPI classification framework for {year}")
-            if DOWNLOAD_DELAY:
-                time.sleep(DOWNLOAD_DELAY)
-            frameworks[year] = _read_table(http_get(client, url).content, url)
+            time.sleep(DOWNLOAD_DELAY)
+            frameworks[year] = _read_table(http_get(client, framework_url).content, framework_url)
     panel = build_panel(months, frameworks, resolver)
     logger.info(
         "Parsed %d consumption segments across %d months (%s to %s)",
