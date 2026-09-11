@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import TextClause, text
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import Connection
 
 from scripts.config import SCHEMA_NAME, WEIGHTS_TABLE
 
@@ -16,12 +16,11 @@ logger = logging.getLogger(__name__)
 _TABLE = f"{SCHEMA_NAME}.{WEIGHTS_TABLE}"
 
 
-def assert_operational_storage(engine: Engine) -> None:
+def assert_operational_storage(conn: Connection) -> None:
     """Refuse to mix legacy baskets in parts per thousand with local shares."""
-    with engine.connect() as conn:
-        legacy = conn.execute(
-            text(f"SELECT COUNT(*) FROM {_TABLE} WHERE weight > 1 OR weight < 0")
-        ).scalar_one()
+    legacy = conn.execute(
+        text(f"SELECT COUNT(*) FROM {_TABLE} WHERE weight > 1 OR weight < 0")
+    ).scalar_one()
     if legacy:
         raise ValueError(
             "weights contains legacy basket points; archive/rebuild this table "
@@ -98,7 +97,7 @@ def _write_batches(
         )
 
 
-def _latest(engine: Engine, minimum_date: date) -> dict[tuple[str, date], dict[str, Any]]:
+def _latest(conn: Connection, minimum_date: date) -> dict[tuple[str, date], dict[str, Any]]:
     sql = text(
         f"""SELECT series_id, reference_date, vintage_date, weight, collected_at
         FROM (SELECT series_id, reference_date, vintage_date, weight, collected_at,
@@ -106,8 +105,7 @@ def _latest(engine: Engine, minimum_date: date) -> dict[tuple[str, date], dict[s
         ORDER BY vintage_date DESC, collected_at DESC) AS rn
         FROM {_TABLE} WHERE reference_date >= :minimum_date) ranked WHERE rn = 1"""
     )
-    with engine.connect() as conn:
-        rows = conn.execute(sql, {"minimum_date": minimum_date}).mappings().all()
+    rows = conn.execute(sql, {"minimum_date": minimum_date}).mappings().all()
     result: dict[tuple[str, date], dict[str, Any]] = {}
     for row in rows:
         ref = (
@@ -120,12 +118,11 @@ def _latest(engine: Engine, minimum_date: date) -> dict[tuple[str, date], dict[s
 
 
 def upsert_weights(
-    engine: Engine,
+    conn: Connection,
     weights_by_date: dict[date, dict[str, float]],
-    collected_at: datetime | None = None,
+    collected_at: datetime,
 ) -> tuple[int, int]:
     """Write operational weights idempotently and return ``(new, new_vintages)``."""
-    collected_at = collected_at or datetime.now(UTC)
     today = collected_at.date()
     incoming: list[dict[str, Any]] = []
     for reference_date, weights in weights_by_date.items():
@@ -144,7 +141,7 @@ def upsert_weights(
     if not incoming:
         logger.info("No weight rows to upsert")
         return 0, 0
-    existing = _latest(engine, min(row["reference_date"] for row in incoming))
+    existing = _latest(conn, min(row["reference_date"] for row in incoming))
     inserts: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []
     new_rows = 0
@@ -168,10 +165,9 @@ def upsert_weights(
         else:
             inserts.append({**row, "vintage_date": today})
             new_vintages += 1
-    with engine.begin() as conn:
-        merge = conn.dialect.name in _MERGE_DIALECTS
-        _write_batches(conn, inserts, "insert", merge=False)
-        _write_batches(conn, updates, "same-day update", merge=merge)
+    merge = conn.dialect.name in _MERGE_DIALECTS
+    _write_batches(conn, inserts, "insert", merge=False)
+    _write_batches(conn, updates, "same-day update", merge=merge)
     logger.info(
         "Weights upsert: new=%d new_vintages=%d same_day_updates=%d",
         new_rows,

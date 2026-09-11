@@ -3,33 +3,48 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from pathlib import Path
 
 from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
-from scripts import init_db, original_weights
-from tests.test_idempotency import _engine
+from scripts.original_weights import upsert_original_weights
+
+FIRST = datetime(2026, 8, 19)  # noqa: DTZ001
+LATER = datetime(2026, 8, 20)  # noqa: DTZ001
 
 
-def test_original_regimes_and_revisions(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    with engine.begin() as conn:
-        conn.execute(text(init_db.CREATE_ORIGINAL_WEIGHTS_TABLE.format(double="DOUBLE")))
-    jan, feb = date(2026, 1, 1), date(2026, 2, 1)
-    first = datetime(2026, 8, 19)  # noqa: DTZ001
-    later = datetime(2026, 8, 20)  # noqa: DTZ001
-    values = {jan: {"CPI_W1_0": 1000}, feb: {"CPI_W1_0": 999}}
-    assert original_weights.upsert_original_weights(engine, values, first) == (2, 0)
-    assert original_weights.upsert_original_weights(engine, values, first) == (0, 0)
-    values[feb]["CPI_W1_0"] = 998
-    assert original_weights.upsert_original_weights(engine, values, first) == (0, 0)
-    values[feb]["CPI_W1_0"] = 997
-    assert original_weights.upsert_original_weights(engine, values, later) == (0, 1)
+def _rows(january: float, february: float) -> list[dict[str, object]]:
+    return [
+        {
+            "series_id": "CPI_W1_0",
+            "reference_date": date(2026, 1, 1),
+            "weight": january,
+            "weight_base_year": 2026,
+        },
+        {
+            "series_id": "CPI_W1_0",
+            "reference_date": date(2026, 2, 1),
+            "weight": february,
+            "weight_base_year": 2026,
+        },
+    ]
+
+
+def test_original_regimes_and_revisions(engine: Engine) -> None:
+    """January and February-December are distinct published regimes, not revisions."""
+    for rows, collected_at, expected in (
+        (_rows(1000.0, 999.0), FIRST, (2, 0)),
+        (_rows(1000.0, 999.0), FIRST, (0, 0)),
+        (_rows(1000.0, 998.0), FIRST, (0, 0)),
+        (_rows(1000.0, 997.0), LATER, (0, 1)),
+    ):
+        with engine.begin() as conn:
+            assert upsert_original_weights(conn, rows, collected_at) == expected
     with engine.connect() as conn:
-        rows = conn.execute(
+        stored = conn.execute(
             text(
                 "SELECT weight, weight_base_year FROM collector_ons_cpi.original_weights "
                 "ORDER BY reference_date, vintage_date"
             )
         ).all()
-    assert rows == [(1000, 2026), (998, 2026), (997, 2026)]
+    assert stored == [(1000.0, 2026), (998.0, 2026), (997.0, 2026)]

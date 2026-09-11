@@ -1,4 +1,4 @@
-"""Opt-in ONS source snapshot replay against a real SQLite test database.
+"""Opt-in ONS source replay against a real SQLite test database.
 
 Run: ONS_LIVE_TEST=1 python -m pytest tests/test_live_source.py -q -s
 No production database is contacted and no downloaded workbook is cached.
@@ -11,56 +11,89 @@ from datetime import date
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
 import main
-from scripts import extract, init_db
-from tests.test_idempotency import _engine
+from scripts import extract, segments
 
 
 @pytest.mark.skipif(os.getenv("ONS_LIVE_TEST") != "1", reason="explicit live-source opt-in")
-def test_source_snapshot_twice_and_logged_failure(tmp_path, monkeypatch) -> None:
+def test_source_replay_twice_and_logged_failure(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
     observations = extract.collect_raw_data(date(1988, 1, 1))
     basket = extract.collect_weights(date(2008, 1, 1))
-    engine = _engine(tmp_path)
-    with engine.begin() as conn:
-        conn.execute(text(init_db.CREATE_ORIGINAL_WEIGHTS_TABLE.format(double="DOUBLE")))
+    catalog = extract.get_series_catalog()
+    weight_codes = [fields["code"] for fields in extract.get_original_weight_catalog().values()]
+    panel = segments.collect_segments(date(1988, 1, 1), catalog, weight_codes)
+
     monkeypatch.setattr(main, "_preflight", lambda: None)
     monkeypatch.setattr(main, "build_engine", lambda: engine)
-    monkeypatch.setattr(main, "init_db", lambda _: None)
-    monkeypatch.setattr(main, "collect_raw_data", lambda _: observations)
-    monkeypatch.setattr(main, "collect_weights", lambda _: basket)
+    monkeypatch.setattr(main, "init_db", lambda _engine: None)
+    monkeypatch.setattr(main, "collect_raw_data", lambda _start: observations)
+    monkeypatch.setattr(main, "collect_weights", lambda _start: basket)
+    monkeypatch.setattr(main, "collect_segments", lambda *_args: panel)
 
-    def snapshot():
+    def snapshot() -> dict[str, list[tuple]]:
         with engine.connect() as conn:
             return {
                 table: conn.execute(
-                    text(f"SELECT * FROM collector_ons_cpi.{table} ORDER BY series_id")
+                    text(
+                        f"SELECT * FROM collector_ons_cpi.{table} "
+                        "ORDER BY series_id, reference_date"
+                    )
                 ).all()
-                for table in ("time_series", "weights", "original_weights", "metadata")
+                for table in ("time_series", "weights", "original_weights")
+            } | {
+                "metadata": conn.execute(
+                    text("SELECT * FROM collector_ons_cpi.metadata ORDER BY series_id")
+                ).all()
             }
 
     assert main.run(["--no-watch"]) == 0
     first = snapshot()
     assert main.run(["--no-watch"]) == 0
     assert snapshot() == first
-    latest = max(observations)
-    metadata = {row[0]: row for row in first["metadata"]}
-    for series_id in extract.get_series_catalog():
-        assert series_id in metadata
-        source = [
-            (month, values[series_id])
-            for month, values in sorted(observations.items())
-            if values.get(series_id) is not None
-        ]
-        stored = {row[1]: row[3] for row in first["time_series"] if row[0] == series_id}
-        for month, value in (source[0], source[len(source) // 2], source[-1]):
-            assert stored[month] == value
-        assert len(stored) == len(source)
-    monkeypatch.setattr(main, "collect_weights", lambda _: {})
+
+    stored_by_series: dict[str, dict[date, float]] = {}
+    for series_id, reference_date, _vintage, value, _collected in first["time_series"]:
+        stored_by_series.setdefault(series_id, {})[reference_date] = value
+    source = {
+        **{
+            series_id: {
+                month: values[series_id]
+                for month, values in sorted(observations.items())
+                if values.get(series_id) is not None
+            }
+            for series_id in catalog
+        },
+        **{
+            series_id: {
+                month: values[series_id]
+                for month, values in sorted(panel.observations.items())
+                if series_id in values
+            }
+            for series_id in panel.catalog
+        },
+    }
+    assert set(stored_by_series) == set(source)
+    for series_id, published in source.items():
+        stored = stored_by_series[series_id]
+        assert len(stored) == len(published)
+        months = sorted(published)
+        for month in (months[0], months[len(months) // 2], months[-1]):
+            assert stored[month] == published[month]
+
+    monkeypatch.setattr(main, "collect_weights", lambda _start: {})
     assert main.run(["--no-watch"]) == 1
     assert snapshot() == first
     with engine.connect() as conn:
         assert conn.execute(
             text("SELECT status FROM collector_ons_cpi.logs ORDER BY id")
         ).scalars().all() == ["success", "success", "error"]
-    print("SOURCE REPLAY", latest, {table: len(rows) for table, rows in first.items()})
+    print(
+        "SOURCE REPLAY",
+        max(observations),
+        {table: len(rows) for table, rows in first.items()},
+        f"segments={len(panel.catalog)}",
+    )

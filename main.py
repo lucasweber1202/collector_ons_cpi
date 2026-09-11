@@ -8,8 +8,10 @@ import logging
 import sys
 import time
 import traceback
+from collections import Counter
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.engine import Engine
 
@@ -29,25 +31,36 @@ from scripts.export_validation_xlsx import export_validation_xlsx
 from scripts.extract import (
     collect_raw_data,
     collect_weights,
+    get_original_weight_catalog,
     get_original_weights,
     get_series_catalog,
     get_workbook_fingerprint,
+    register_series,
 )
 from scripts.init_db import init_db
-from scripts.metadata import upsert_metadata
+from scripts.metadata import assert_current_series_ids, upsert_metadata
 from scripts.original_weights import upsert_original_weights
 from scripts.run_logs import insert_run_log
+from scripts.segments import SEGMENT_FIRST_MONTH, SegmentPanel, chain_year, collect_segments
 from scripts.time_series import get_max_reference_date, upsert_time_series
 from scripts.validate import (
     build_hierarchy,
     derive_operational_weights,
+    derive_segment_operational_weights,
     log_validation_summary,
     validate_bottom_up,
+    validate_segment_bottom_up,
+    validate_segment_weight_sums,
     validate_weight_sums,
 )
 from scripts.weights import assert_operational_storage, upsert_weights
 
 logger = logging.getLogger("main")
+
+# Dialects whose multi-statement transaction covers every table a release
+# touches. Databricks SQL commits each statement on its own, so there the run
+# relies on the idempotent revision rewind to repair an interrupted release.
+TRANSACTIONAL_DIALECTS = frozenset({"postgresql", "sqlite"})
 
 
 def _setup_logging(level: str) -> io.StringIO:
@@ -172,6 +185,103 @@ def main(args: argparse.Namespace) -> int:
         engine.dispose()
 
 
+def _gate(
+    label: str,
+    checks: list[dict[str, Any]],
+    skips: Counter[str],
+    problems: list[str],
+    *,
+    required: bool = True,
+) -> None:
+    """Log one validation layer and record why it would stop persistence."""
+    _, failed, _, coverage, _, attempted = log_validation_summary(checks, skips, label)
+    if failed:
+        problems.append(f"{label}: {failed} checks outside tolerance")
+    if attempted == 0:
+        if required:
+            problems.append(f"{label}: nothing was reconcilable in this window")
+        else:
+            logger.info("%s validation: no link is defined at source in this window", label)
+        return
+    if not checks:
+        problems.append(f"{label}: reconciled nothing")
+    elif coverage < MIN_VALIDATION_COVERAGE:
+        problems.append(f"{label}: coverage {coverage:.4f} below {MIN_VALIDATION_COVERAGE:.4f}")
+
+
+def _collect_segment_panel(start_date: date, catalog: dict[str, dict[str, str]]) -> SegmentPanel:
+    """Collect consumption segments against the official weight classification codes."""
+    weight_codes = [fields["code"] for fields in get_original_weight_catalog().values()]
+    return collect_segments(start_date, catalog, weight_codes)
+
+
+def _merge_observations(
+    parsed: dict[date, dict[str, float | None]], segments: dict[date, dict[str, float]]
+) -> dict[date, dict[str, float | None]]:
+    """Combine the two published layers into one observation set for persistence."""
+    merged: dict[date, dict[str, float | None]] = {
+        month: dict(values) for month, values in parsed.items()
+    }
+    for month, values in segments.items():
+        target = merged.setdefault(month, {})
+        for series_id, value in values.items():
+            if series_id in target:
+                raise ValueError(f"{series_id} is published by two ONS layers at {month}")
+            target[series_id] = value
+    return merged
+
+
+def _merge_weights(
+    coicop: dict[date, dict[str, float]], segments: dict[date, dict[str, float]]
+) -> dict[date, dict[str, float]]:
+    """Combine operational shares from both layers, refusing any collision."""
+    merged: dict[date, dict[str, float]] = {month: dict(values) for month, values in coicop.items()}
+    for month, values in segments.items():
+        target = merged.setdefault(month, {})
+        for series_id, value in values.items():
+            if series_id in target:
+                raise ValueError(f"{series_id} has two operational weights at {month}")
+            target[series_id] = value
+    return merged
+
+
+def _original_weight_rows(
+    basket: dict[date, dict[str, float]], segments: dict[date, dict[str, float]]
+) -> list[dict[str, Any]]:
+    """Flatten both official weight products, each stamped with its own regime year.
+
+    W1 publishes a January column and a February-December column inside one
+    calendar year, so its regime year is the reference month's year. A
+    consumption-segment basket instead runs February to the following January,
+    so a January segment weight belongs to the previous year's basket.
+    """
+    rows: list[dict[str, Any]] = []
+    for month, weights in sorted(basket.items()):
+        rows.extend(
+            {
+                "series_id": series_id,
+                "reference_date": month,
+                "weight": weight,
+                "weight_base_year": month.year,
+            }
+            for series_id, weight in weights.items()
+        )
+    for month, weights in sorted(segments.items()):
+        rows.extend(
+            {
+                "series_id": series_id,
+                "reference_date": month,
+                "weight": weight,
+                "weight_base_year": chain_year(month),
+            }
+            for series_id, weight in weights.items()
+        )
+    keys = {(row["series_id"], row["reference_date"]) for row in rows}
+    if len(keys) != len(rows):
+        raise ValueError("Two official weight products published the same series and month")
+    return rows
+
+
 def _collect(args: argparse.Namespace, engine: Engine) -> int:
     """Collect with a caller-owned database engine."""
     init_db(engine)
@@ -192,72 +302,108 @@ def _collect(args: argparse.Namespace, engine: Engine) -> int:
             return 0
         parsed, extraction_start = release
 
-    weights = collect_weights(max(extraction_start, date(2008, 1, 1)))
-    hierarchy = build_hierarchy(list(get_series_catalog()))
-    weight_checks, weight_skips = validate_weight_sums(weights, hierarchy)
-    bottom_up_checks, bottom_up_skips = validate_bottom_up(parsed, weights, hierarchy)
-    _, failed_weights, _, weight_coverage, _ = log_validation_summary(
-        weight_checks, weight_skips, "Basket-weight"
+    basket = collect_weights(max(extraction_start, date(2008, 1, 1)))
+    hierarchy = build_hierarchy(get_series_catalog())
+    segments = _collect_segment_panel(extraction_start, get_series_catalog())
+    for series_id, fields in segments.catalog.items():
+        register_series(series_id, fields)
+    observations = _merge_observations(parsed, segments.observations)
+
+    problems: list[str] = []
+    weight_checks, weight_skips = validate_weight_sums(basket, hierarchy)
+    _gate("Basket-weight", weight_checks, weight_skips, problems)
+    bottom_up_checks, bottom_up_skips = validate_bottom_up(parsed, basket, hierarchy)
+    _gate("Bottom-up", bottom_up_checks, bottom_up_skips, problems)
+
+    segments_expected = max(observations) >= SEGMENT_FIRST_MONTH if observations else False
+    if segments_expected and not segments.observations:
+        problems.append("consumption segments: no published edition was collected in this window")
+    segment_weight_checks, segment_weight_skips = validate_segment_weight_sums(
+        segments.official_weights, basket, segments.hierarchy
     )
-    _, failed_bottom_up, _, bottom_up_coverage, _ = log_validation_summary(
-        bottom_up_checks, bottom_up_skips, "Bottom-up"
+    _gate(
+        "Segment-weight",
+        segment_weight_checks,
+        segment_weight_skips,
+        problems,
+        required=segments_expected,
     )
-    problems = []
-    if failed_weights or failed_bottom_up:
-        problems.append(
-            f"tolerance breaches: weight_checks={failed_weights}, "
-            f"bottom_up_checks={failed_bottom_up}"
-        )
-    for label, checks, coverage in (
-        ("weight", weight_checks, weight_coverage),
-        ("bottom-up", bottom_up_checks, bottom_up_coverage),
-    ):
-        if not checks:
-            problems.append(f"{label} validation reconciled nothing")
-        elif coverage < MIN_VALIDATION_COVERAGE:
-            problems.append(
-                f"{label} coverage {coverage:.4f} below minimum {MIN_VALIDATION_COVERAGE:.4f}"
-            )
+    segment_checks, segment_skips = validate_segment_bottom_up(
+        observations, segments.official_weights, segments.hierarchy
+    )
+    _gate("Segment bottom-up", segment_checks, segment_skips, problems, required=False)
     if problems:
         raise ValueError("Validation failed: " + "; ".join(problems))
 
-    operational = derive_operational_weights(parsed, weights, hierarchy)
+    operational = _merge_weights(
+        derive_operational_weights(parsed, basket, hierarchy),
+        derive_segment_operational_weights(
+            observations, segments.official_weights, segments.hierarchy
+        ),
+    )
     operational_checks, operational_skips = validate_bottom_up(
         parsed, operational, hierarchy, operational=True
     )
-    _, operational_failed, _, operational_coverage, _ = log_validation_summary(
-        operational_checks, operational_skips, "Operational bottom-up"
+    _gate("Operational bottom-up", operational_checks, operational_skips, problems)
+    segment_operational_checks, segment_operational_skips = validate_segment_bottom_up(
+        observations, operational, segments.hierarchy, operational=True
     )
-    if (
-        operational_failed
-        or not operational_checks
-        or operational_coverage < MIN_VALIDATION_COVERAGE
-    ):
-        raise ValueError("Validation failed: operational weights do not reconcile")
+    _gate(
+        "Segment operational bottom-up",
+        segment_operational_checks,
+        segment_operational_skips,
+        problems,
+        required=False,
+    )
+    if problems:
+        raise ValueError("Validation failed: " + "; ".join(problems))
+
+    original_weights = _original_weight_rows(get_original_weights(), segments.official_weights)
+
     collected_at = datetime.now(UTC)
-    assert_operational_storage(engine)
-    new_obs, new_vintages = upsert_time_series(engine, parsed, collected_at)
-    upsert_original_weights(engine, get_original_weights(), collected_at)
-    new_weights, weight_vintages = upsert_weights(engine, operational, collected_at)
-    metadata_inserted, metadata_updated = upsert_metadata(engine, parsed, collected_at)
+    if engine.dialect.name not in TRANSACTIONAL_DIALECTS:
+        logger.warning(
+            "%s commits each statement separately; an interrupted release is repaired by the "
+            "next run's revision rewind rather than rolled back",
+            engine.dialect.name,
+        )
+    with engine.begin() as conn:
+        assert_operational_storage(conn)
+        assert_current_series_ids(conn)
+        new_obs, new_vintages = upsert_time_series(conn, observations, collected_at)
+        new_original, original_vintages = upsert_original_weights(
+            conn, original_weights, collected_at
+        )
+        new_weights, weight_vintages = upsert_weights(conn, operational, collected_at)
+        metadata_inserted, metadata_updated = upsert_metadata(
+            conn, observations, collected_at, get_series_catalog()
+        )
     logger.info(
         "Run result: observations=%d vintages=%d weights=%d weight_vintages=%d "
+        "original_weights=%d original_weight_vintages=%d "
         "metadata_inserted=%d metadata_updated=%d",
         new_obs,
         new_vintages,
         new_weights,
         weight_vintages,
+        new_original,
+        original_vintages,
         metadata_inserted,
         metadata_updated,
     )
     if args.export_validation:
         output = export_validation_xlsx(
-            parsed,
-            operational,
-            hierarchy,
-            weight_checks + bottom_up_checks + operational_checks,
+            engine,
+            get_series_catalog(),
+            get_original_weight_catalog(),
+            weight_checks
+            + bottom_up_checks
+            + operational_checks
+            + segment_weight_checks
+            + segment_checks
+            + segment_operational_checks,
             Path(ROOT_DIR) / "_verify_xls" / "ons_cpi_validation.xlsx",
-            original_weights=get_original_weights(),
+            as_of=collected_at.date(),
         )
         logger.info("Wrote validation workbook to %s", output)
     return 0

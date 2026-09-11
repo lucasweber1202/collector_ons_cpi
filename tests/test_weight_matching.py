@@ -2,73 +2,112 @@
 
 from __future__ import annotations
 
-import io
 import logging
+from collections.abc import Callable
 from datetime import date
 
-import pandas as pd
 import pytest
 
-from scripts.extract import _make_series_id, parse_weights_workbook
+from scripts.extract import (
+    get_original_weight_catalog,
+    get_original_weights,
+    parse_weights_workbook,
+)
+from tests.conftest import catalog_entry
 
-EDUCATION = _make_series_id("COICOP", "D10", "D7C5", "Education")
-HEALTH = _make_series_id("COICOP", "D06", "D7BX", "Health")
-CATALOG = {
-    EDUCATION: {"family": "COICOP", "node": "D10", "native_id": "D7C5", "name": "EDUCATION"},
-    HEALTH: {"family": "COICOP", "node": "D06", "native_id": "D7BX", "name": "HEALTH"},
-}
+_EDUCATION = catalog_entry("COICOP", "D10", "D7C5", "EDUCATION", classification="10")
+_HEALTH = catalog_entry("COICOP", "D06", "D7BX", "HEALTH", classification="6")
+EDUCATION, HEALTH = _EDUCATION[0], _HEALTH[0]
+CATALOG = dict([_EDUCATION, _HEALTH])
+JUNE = date(2026, 6, 1)
 
-
-def _workbook(rows: list[tuple[str, float]]) -> bytes:
-    """Build a minimal W1-CPI sheet: header block, then one label/weight per row."""
-    grid: list[list[object]] = [[None] * 4 for _ in range(4)]
-    grid.append([None, None, None, "2026 Feb-Dec"])
-    for label, weight in rows:
-        grid.append([None, None, label, weight])
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        pd.DataFrame(grid).to_excel(writer, sheet_name="W1-CPI", header=False, index=False)
-    return buffer.getvalue()
+Workbook = Callable[..., bytes]
 
 
 def test_agreeing_duplicate_rows_are_reported_but_keep_the_value(
-    caplog: pytest.LogCaptureFixture,
+    weights_workbook: Workbook, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Two rows for one series must be surfaced even when the values agree."""
-    blob = _workbook([("10 Education", 34.2466), ("10.0 Education", 34.2466)])
+    blob = weights_workbook([("10 Education", 34.2466), ("10.0 Education", 34.2466)])
 
     with caplog.at_level(logging.WARNING, logger="scripts.extract"):
         parsed = parse_weights_workbook(blob, CATALOG)
 
-    assert parsed[date(2026, 6, 1)][EDUCATION] == pytest.approx(34.2466)
-    assert any("both map to" in r.getMessage() for r in caplog.records)
-    assert not any("Conflicting W1 weights" in r.getMessage() for r in caplog.records)
+    assert parsed[JUNE][EDUCATION] == pytest.approx(34.2466)
+    assert any("both map to" in record.getMessage() for record in caplog.records)
+    assert not any("Conflicting W1 weights" in record.getMessage() for record in caplog.records)
 
 
-def test_conflicting_duplicate_rows_are_reported(caplog: pytest.LogCaptureFixture) -> None:
+def test_conflicting_duplicate_rows_are_reported(weights_workbook: Workbook) -> None:
     """Disagreeing duplicates make the stored weight depend on row order."""
-    blob = _workbook([("10 Education", 34.2466), ("10.0 Education", 99.9999)])
+    blob = weights_workbook([("10 Education", 34.2466), ("10.0 Education", 99.9999)])
 
     with pytest.raises(ValueError, match="Conflicting W1 weights"):
         parse_weights_workbook(blob, CATALOG)
 
 
-def test_unmatched_row_is_reported_and_dropped(caplog: pytest.LogCaptureFixture) -> None:
-    """A W1 row with no Table 38 counterpart is an exception, not silent noise."""
-    blob = _workbook([("10 Education", 34.2466), ("10.4 Tertiary education", 5.0)])
+def test_unmatched_row_is_reported_and_kept_only_as_an_official_weight(
+    weights_workbook: Workbook, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A W1 row with no Table 38 counterpart never becomes an invented series."""
+    blob = weights_workbook([("10 Education", 34.2466), ("10.4 Tertiary education", 5.0)])
 
     with caplog.at_level(logging.WARNING, logger="scripts.extract"):
         parsed = parse_weights_workbook(blob, CATALOG)
 
-    assert set(parsed[date(2026, 6, 1)]) == {EDUCATION}
-    assert any("matched no Table 38 series" in r.getMessage() for r in caplog.records)
+    assert set(parsed[JUNE]) == {EDUCATION}
+    assert get_original_weights()[JUNE]["CPI_W1_10P4"] == 5.0
+    assert any("matched no Table 38 series" in record.getMessage() for record in caplog.records)
 
 
-def test_start_date_still_filters_expanded_months() -> None:
+def test_start_date_still_filters_expanded_months(weights_workbook: Workbook) -> None:
     """The regime expansion keeps honouring the extraction window."""
-    blob = _workbook([("10 Education", 34.2466)])
+    blob = weights_workbook([("10 Education", 34.2466)])
 
     parsed = parse_weights_workbook(blob, CATALOG, start_date=date(2026, 7, 1))
 
     assert min(parsed) == date(2026, 7, 1)
     assert max(parsed) == date(2026, 12, 1)
+
+
+def test_ambiguous_node_is_rejected(weights_workbook: Workbook) -> None:
+    catalog = dict(
+        entry
+        for entry in (
+            catalog_entry("COICOP", "D10", "ONE", "Education", classification="10"),
+            catalog_entry("COICOP", "D10", "TWO", "Education", classification="10"),
+        )
+    )
+    with pytest.raises(ValueError, match="Ambiguous"):
+        parse_weights_workbook(weights_workbook([("10 Education", 34.0)]), catalog)
+
+
+def test_reviewed_alias_without_its_cdid_is_rejected(weights_workbook: Workbook) -> None:
+    """A merged class must never silently fall back to a node match."""
+    with pytest.raises(ValueError, match="requires missing CDID"):
+        parse_weights_workbook(
+            weights_workbook([("07.3.2/6 Passenger transport by road", 10.0)]), CATALOG
+        )
+
+
+def test_subclass_weights_are_preserved_without_fake_index_metadata(
+    weights_workbook: Workbook,
+) -> None:
+    """A weight-only subclass keeps its official weight and gains no series."""
+    blob = weights_workbook([("10 Education", 34.0), ("01.1.1.1 Rice", 2.0)])
+
+    parsed = parse_weights_workbook(blob, CATALOG)
+
+    assert set(parsed[JUNE]) == {EDUCATION}
+    original = get_original_weights()[JUNE]
+    assert original["CPI_W1_01P1P1P1"] == 2.0
+    assert original["CPI_W1_10"] == 34.0
+    catalog = get_original_weight_catalog()
+    assert catalog["CPI_W1_01P1P1P1"]["mapped_series_id"] == ""
+    assert catalog["CPI_W1_10"]["mapped_series_id"] == EDUCATION
+    assert catalog["CPI_W1_10"]["native_id"] == "TEST"
+
+
+def test_negative_published_weight_is_rejected(weights_workbook: Workbook) -> None:
+    with pytest.raises(ValueError, match="Negative W1 weight"):
+        parse_weights_workbook(weights_workbook([("10 Education", -1.0)]), CATALOG)

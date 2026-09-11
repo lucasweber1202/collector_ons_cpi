@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections import Counter
 from datetime import date
 
-from scripts.extract import _make_series_id
 from scripts.validate import (
     SKIP_CHILD_WITHOUT_OBSERVATION,
     SKIP_CHILD_WITHOUT_WEIGHT,
@@ -16,11 +15,18 @@ from scripts.validate import (
     validate_bottom_up,
     validate_weight_sums,
 )
+from tests.conftest import catalog_entry
 
-PARENT = _make_series_id("COICOP", "ALL", "AAAA", "All items")
-FIRST = _make_series_id("COICOP", "D01", "BBBB", "First division")
-SECOND = _make_series_id("COICOP", "D02", "CCCC", "Second division")
-HIERARCHY = build_hierarchy([PARENT, FIRST, SECOND])
+_PARENT = catalog_entry("COICOP", "ALL", "D7BT", "All items", level="all_items")
+_FIRST = catalog_entry(
+    "COICOP", "D01", "D7BU", "First division", level="division", parent=_PARENT[0]
+)
+_SECOND = catalog_entry(
+    "COICOP", "D02", "D7BV", "Second division", level="division", parent=_PARENT[0]
+)
+PARENT, FIRST, SECOND = _PARENT[0], _FIRST[0], _SECOND[0]
+CATALOG = dict([_PARENT, _FIRST, _SECOND])
+HIERARCHY = build_hierarchy(CATALOG)
 
 JANUARY = date(2026, 1, 1)
 FEBRUARY = date(2026, 2, 1)
@@ -72,9 +78,10 @@ def test_summary_reports_zero_coverage_when_nothing_was_checked() -> None:
     weights = {FEBRUARY: {PARENT: 1000.0, FIRST: 250.0}}
     results, skips = validate_bottom_up(OBSERVATIONS, weights, HIERARCHY)
 
-    passed, failed, skipped, coverage, max_residual = log_validation_summary(
+    passed, failed, skipped, coverage, max_residual, attempted = log_validation_summary(
         results, skips, "Bottom-up"
     )
+    assert attempted == 1
 
     assert (passed, failed) == (0, 0)
     assert skipped == 1
@@ -92,7 +99,7 @@ def test_recent_missing_weight_month_depresses_coverage() -> None:
     weights = {march: {PARENT: 1000.0, FIRST: 250.0, SECOND: 750.0}}
 
     results, skips = validate_bottom_up(observations, weights, HIERARCHY)
-    _, _, skipped, coverage, _ = log_validation_summary(results, skips, "Bottom-up")
+    _, _, skipped, coverage, _, _ = log_validation_summary(results, skips, "Bottom-up")
 
     assert len(results) == 1  # only March carries weights
     assert skips[SKIP_OUTSIDE_WEIGHTS_WINDOW] == 0  # 2026 is within source coverage
@@ -115,7 +122,7 @@ def test_full_coverage_reports_one() -> None:
     weights = {FEBRUARY: {PARENT: 1000.0, FIRST: 250.0, SECOND: 750.0}}
 
     results, skips = validate_bottom_up(OBSERVATIONS, weights, HIERARCHY)
-    _, _, skipped, coverage, _ = log_validation_summary(results, skips, "Bottom-up")
+    _, _, skipped, coverage, _, _ = log_validation_summary(results, skips, "Bottom-up")
 
     assert len(results) == 1
     assert skipped == 0

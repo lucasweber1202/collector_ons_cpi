@@ -40,9 +40,9 @@ def test_operational_validation_does_not_renormalize_bad_weights() -> None:
 def test_standalone_analytical_aggregate_gets_unit_weight() -> None:
     feb = date(2026, 2, 1)
     observations = {
-        month: {**values, "CPI_ALT_A01_TEST_GOODS": 100.0} for month, values in OBSERVATIONS.items()
+        month: {**values, "CPI_ALT_A02_D7F4": 100.0} for month, values in OBSERVATIONS.items()
     }
     result = validate.derive_operational_weights(
         observations, {feb: {PARENT: 1000, FIRST: 250, SECOND: 750}}, HIERARCHY
     )
-    assert result[feb]["CPI_ALT_A01_TEST_GOODS"] == 1.0
+    assert result[feb]["CPI_ALT_A02_D7F4"] == 1.0

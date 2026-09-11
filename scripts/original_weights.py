@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import TextClause, text
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import Connection
 
 from scripts.config import ORIGINAL_WEIGHTS_TABLE, SCHEMA_NAME
 
@@ -90,16 +90,17 @@ def _write_batches(
         )
 
 
-def _latest(engine: Engine, minimum_date: date) -> dict[tuple[str, date], dict[str, Any]]:
+def _latest(conn: Connection, minimum_date: date) -> dict[tuple[str, date], dict[str, Any]]:
     sql = text(
-        f"""SELECT series_id, reference_date, vintage_date, weight, collected_at
-        FROM (SELECT series_id, reference_date, vintage_date, weight, collected_at,
+        f"""SELECT series_id, reference_date, vintage_date, weight, weight_base_year,
+        collected_at
+        FROM (SELECT series_id, reference_date, vintage_date, weight, weight_base_year,
+        collected_at,
         ROW_NUMBER() OVER (PARTITION BY series_id, reference_date
         ORDER BY vintage_date DESC, collected_at DESC) AS rn
         FROM {_TABLE} WHERE reference_date >= :minimum_date) ranked WHERE rn = 1"""
     )
-    with engine.connect() as conn:
-        rows = conn.execute(sql, {"minimum_date": minimum_date}).mappings().all()
+    rows = conn.execute(sql, {"minimum_date": minimum_date}).mappings().all()
     result: dict[tuple[str, date], dict[str, Any]] = {}
     for row in rows:
         ref = (
@@ -112,32 +113,37 @@ def _latest(engine: Engine, minimum_date: date) -> dict[tuple[str, date], dict[s
 
 
 def upsert_original_weights(
-    engine: Engine,
-    weights_by_date: dict[date, dict[str, float]],
-    collected_at: datetime | None = None,
+    conn: Connection,
+    rows: list[dict[str, Any]],
+    collected_at: datetime,
 ) -> tuple[int, int]:
-    """Write official weights idempotently and return ``(new, new_vintages)``."""
-    collected_at = collected_at or datetime.now(UTC)
+    """Write official weights idempotently and return ``(new, new_vintages)``.
+
+    Each row states its own ``weight_base_year``. The two ONS weight products
+    run different annual regimes -- W1 labels January and February-December of
+    one calendar year, while a consumption-segment basket runs February to the
+    following January -- so the regime year cannot be inferred from the
+    reference month here.
+    """
     today = collected_at.date()
     incoming: list[dict[str, Any]] = []
-    for reference_date, weights in weights_by_date.items():
-        for series_id, raw_weight in weights.items():
-            weight = float(raw_weight)
-            if math.isfinite(weight):
-                incoming.append(
-                    {
-                        "series_id": series_id,
-                        "reference_date": reference_date,
-                        "weight": weight,
-                        "collected_at": collected_at,
-                        "weight_base_year": reference_date.year,
-                    }
-                )
+    for row in rows:
+        weight = float(row["weight"])
+        if math.isfinite(weight):
+            incoming.append(
+                {
+                    "series_id": row["series_id"],
+                    "reference_date": row["reference_date"],
+                    "weight": weight,
+                    "collected_at": collected_at,
+                    "weight_base_year": int(row["weight_base_year"]),
+                }
+            )
     logger.info("Weights upsert: evaluating %d incoming weights", len(incoming))
     if not incoming:
         logger.info("No weight rows to upsert")
         return 0, 0
-    existing = _latest(engine, min(row["reference_date"] for row in incoming))
+    existing = _latest(conn, min(row["reference_date"] for row in incoming))
     inserts: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []
     new_rows = 0
@@ -149,7 +155,12 @@ def upsert_original_weights(
             inserts.append({**row, "vintage_date": today})
             new_rows += 1
             continue
-        if round(float(current["weight"]), ROUND_DECIMALS) == round(row["weight"], ROUND_DECIMALS):
+        # The published regime year is part of the official record, so a
+        # corrected regime is a real change even when the value is unchanged.
+        if (
+            round(float(current["weight"]), ROUND_DECIMALS) == round(row["weight"], ROUND_DECIMALS)
+            and int(current["weight_base_year"]) == row["weight_base_year"]
+        ):
             continue
         vintage = (
             current["vintage_date"].date()
@@ -161,10 +172,9 @@ def upsert_original_weights(
         else:
             inserts.append({**row, "vintage_date": today})
             new_vintages += 1
-    with engine.begin() as conn:
-        merge = conn.dialect.name in _MERGE_DIALECTS
-        _write_batches(conn, inserts, "insert", merge=False)
-        _write_batches(conn, updates, "same-day update", merge=merge)
+    merge = conn.dialect.name in _MERGE_DIALECTS
+    _write_batches(conn, inserts, "insert", merge=False)
+    _write_batches(conn, updates, "same-day update", merge=merge)
     logger.info(
         "Weights upsert: new=%d new_vintages=%d same_day_updates=%d",
         new_rows,
