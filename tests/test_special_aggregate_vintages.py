@@ -1,15 +1,17 @@
-"""Tests for MM23 archived snapshot discovery and January-regime selection."""
+"""Tests for MM23 snapshot discovery and source-backed weight regimes."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
 from scripts.special_aggregate_vintages import (
+    build_exclusion_weight_regimes,
     january_regime_snapshots,
     parse_mm23_snapshot_index,
 )
+from scripts.special_aggregates import EX_CPI_SPECIAL_AGGREGATES, MM23SpecialPanel
 
 
 def _row(version: str, reason: str, superseded: str) -> str:
@@ -29,6 +31,15 @@ def _row(version: str, reason: str, superseded: str) -> str:
 
 def _page(*rows: str) -> str:
     return "<table>" + "".join(rows) + "</table>"
+
+
+def _weight_panel(values_by_year: dict[int, float]) -> MM23SpecialPanel:
+    annual: dict[int, dict[str, float]] = {}
+    for year, value in values_by_year.items():
+        annual[year] = {
+            aggregate["weight_cdid"]: value for aggregate in EX_CPI_SPECIAL_AGGREGATES
+        }
+    return MM23SpecialPanel(annual_weights=annual, monthly_indices={}, monthly_rates_12m={})
 
 
 def test_snapshot_index_parses_version_url_date_and_reason() -> None:
@@ -84,3 +95,58 @@ def test_snapshot_index_fails_loudly_when_layout_has_no_versioned_csv() -> None:
 
     with pytest.raises(ValueError, match="no versioned CSV snapshots"):
         parse_mm23_snapshot_index(page)
+
+
+def test_weight_regimes_use_archived_january_and_current_february_to_december() -> None:
+    current = _weight_panel({2026: 794.8781})
+    january = _weight_panel({2026: 796.0030})
+
+    expanded = build_exclusion_weight_regimes(
+        current,
+        date(2026, 8, 19),
+        {2026: january},
+    )
+
+    assert expanded[date(2026, 1, 1)]["A9FU"] == 796.0030
+    assert expanded[date(2026, 2, 1)]["A9FU"] == 794.8781
+    assert expanded[date(2026, 12, 1)]["A9FU"] == 794.8781
+    assert len(expanded) == 12
+
+
+def test_february_release_uses_current_value_for_january_only() -> None:
+    current = _weight_panel({2026: 796.0030})
+
+    expanded = build_exclusion_weight_regimes(
+        current,
+        date(2026, 2, 18),
+        {},
+    )
+
+    assert set(expanded) == {date(2026, 1, 1)}
+    assert expanded[date(2026, 1, 1)]["A9FU"] == 796.0030
+
+
+def test_historical_double_update_refuses_to_fabricate_missing_january() -> None:
+    current = _weight_panel({2025: 787.1987, 2026: 794.8781})
+
+    with pytest.raises(ValueError, match="Missing archived January MM23 weight panel for 2025"):
+        build_exclusion_weight_regimes(
+            current,
+            date(2026, 8, 19),
+            {2026: _weight_panel({2026: 796.0030})},
+            start_year=2025,
+        )
+
+
+def test_pre_2017_weight_applies_to_all_twelve_months_without_archive() -> None:
+    current = _weight_panel({2016: 788.0})
+
+    expanded = build_exclusion_weight_regimes(
+        current,
+        date(2026, 8, 19),
+        {},
+    )
+
+    assert len(expanded) == 12
+    assert {month.month for month in expanded} == set(range(1, 13))
+    assert all(values["A9FU"] == 788.0 for values in expanded.values())
