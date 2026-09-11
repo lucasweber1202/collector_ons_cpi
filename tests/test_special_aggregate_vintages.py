@@ -8,8 +8,10 @@ import pytest
 
 from scripts.special_aggregate_vintages import (
     build_exclusion_weight_regimes,
+    build_mm23_original_weight_layer,
     january_regime_snapshots,
     map_exclusion_weight_regimes_to_table38,
+    mm23_original_weight_id,
     parse_mm23_snapshot_index,
 )
 from scripts.special_aggregates import EX_CPI_SPECIAL_AGGREGATES, MM23SpecialPanel
@@ -192,3 +194,27 @@ def test_weight_regime_mapping_rejects_missing_alt_target() -> None:
 
     with pytest.raises(ValueError, match="Table 38 ALT CDIDs missing.*DKC6"):
         map_exclusion_weight_regimes_to_table38(regimes, catalog)
+
+
+def test_mm23_original_weight_layer_preserves_source_cdid_and_alt_mapping() -> None:
+    regimes = {
+        date(2026, 1, 1): {
+            aggregate["weight_cdid"]: 700.0 + index
+            for index, aggregate in enumerate(EX_CPI_SPECIAL_AGGREGATES)
+        }
+    }
+
+    originals, audit = build_mm23_original_weight_layer(regimes, _alt_catalog())
+
+    assert originals[date(2026, 1, 1)]["CPI_MM23_A9FU"] == 702.0
+    assert audit["CPI_MM23_A9FU"]["native_id"] == "A9FU"
+    assert audit["CPI_MM23_A9FU"]["mapped_series_id"].endswith("_DKC6")
+    assert audit["CPI_MM23_A9FU"]["dataset"].startswith("ONS Consumer price inflation")
+    assert len(originals[date(2026, 1, 1)]) == len(EX_CPI_SPECIAL_AGGREGATES)
+    assert len(audit) == len(EX_CPI_SPECIAL_AGGREGATES)
+
+
+def test_mm23_original_weight_id_normalizes_native_cdid() -> None:
+    assert mm23_original_weight_id(" a9fu ") == "CPI_MM23_A9FU"
+    with pytest.raises(ValueError, match="CDID is empty"):
+        mm23_original_weight_id("---")
