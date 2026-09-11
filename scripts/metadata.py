@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import TextClause, text
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import Connection
 
-from scripts.config import METADATA_TABLE, SCHEMA_NAME
+from scripts.config import METADATA_TABLE, SCHEMA_NAME, TIME_SERIES_TABLE
 from scripts.extract import (
     COUNTRY_CURRENCY,
     ECO_GROUPS,
     FREQUENCIES,
-    SOURCE_URL,
     UNITS,
     get_last_publish_date,
     parse_series_id,
@@ -23,6 +22,7 @@ from scripts.time_series import get_series_aggregates
 
 logger = logging.getLogger(__name__)
 _TABLE = f"{SCHEMA_NAME}.{METADATA_TABLE}"
+_TIME_SERIES = f"{SCHEMA_NAME}.{TIME_SERIES_TABLE}"
 BATCH_SIZE = 500
 _COMPARABLE_COLUMNS = (
     "name",
@@ -42,6 +42,44 @@ _UPDATE_COLUMNS = tuple(column for column in _COLUMNS if column != "series_id")
 # See scripts/time_series.py: MERGE keeps a batch of changed rows in one
 # statement; the fallback is only reached by the SQLite engine used in tests.
 _MERGE_DIALECTS = frozenset({"databricks", "postgresql"})
+
+# Index references differ by published layer and must never be conflated.
+_INDEX_REFERENCE = {
+    "COICOP": "index reference 2015=100",
+    "ALT": "index reference 2015=100",
+    "CS": "index re-referenced to 100 each January",
+}
+_LEVEL_LABELS = {
+    "all_items": "all items",
+    "division": "COICOP division",
+    "group": "COICOP group",
+    "class": "COICOP class",
+    "analytical_aggregate": "ONS analytical aggregate",
+    "consumption_segment": "ONS consumption segment",
+}
+
+
+def assert_current_series_ids(conn: Connection) -> None:
+    """Refuse to mix pre-migration name-bearing identifiers with stable ones.
+
+    Identifiers used to embed the official series name, so an ONS title edit
+    forked the stored history. The current identifier carries only the family,
+    hierarchy node and native ONS identifier. Mixing the two spellings in one
+    database would silently split every affected series, so a database still
+    holding the old spelling stops the run and is migrated deliberately.
+    """
+    for table in (_TABLE, _TIME_SERIES):
+        legacy = conn.execute(
+            text(
+                f"SELECT COUNT(*) FROM {table} WHERE series_id LIKE 'CPI%' "
+                "AND LENGTH(series_id) - LENGTH(REPLACE(series_id, '_', '')) > 3"
+            )
+        ).scalar_one()
+        if legacy:
+            raise ValueError(
+                f"{table} holds {legacy} rows using the superseded name-bearing series_id "
+                "spelling; see COMPLIANCE.md for the reviewed migration before collecting"
+            )
 
 
 def _batch_parameters(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -103,33 +141,55 @@ def _write_batches(
 
 
 def _as_date(value: Any) -> date | None:
+    """Normalize whatever a dialect returns for a DATE column into a date."""
     if isinstance(value, datetime):
         return value.date()
-    return value if isinstance(value, date) else None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
 
 
-def _series_descriptive_row(series_id: str) -> dict[str, object]:
-    """Derive human-readable fields solely from the structured series ID."""
-    _, family, node, native_id, name_slug = parse_series_id(series_id)
-    official_name = name_slug.replace("_", " ").title()
-    scope = "COICOP hierarchy" if family == "COICOP" else "ONS analytical aggregate"
-    frequency = "monthly"
-    unit = "index"
-    eco_group = "consumer_prices"
+def _series_descriptive_row(series_id: str, fields: dict[str, str]) -> dict[str, object]:
+    """Build the descriptive columns from verified upstream ONS fields.
+
+    ``parse_series_id`` supplies structural identity only. Every human-readable
+    field comes from the workbook or CSV the observation itself came from, so a
+    stored name is the name ONS published rather than a reconstruction.
+    """
+    _, family, _, native_id = parse_series_id(series_id)
+    if fields.get("family") != family or fields.get("native_id") != native_id:
+        raise ValueError(f"Upstream catalog does not describe {series_id}: {fields}")
+    name = str(fields.get("name", "")).strip()
+    if not name:
+        raise ValueError(f"Upstream catalog carries no official name for {series_id}")
+    frequency, unit, eco_group = "monthly", "index", "consumer_prices"
     if frequency not in FREQUENCIES or unit not in UNITS or eco_group not in ECO_GROUPS:
         raise ValueError(f"Invalid controlled vocabulary for {series_id}")
+    level = _LEVEL_LABELS.get(str(fields.get("level", "")), str(fields.get("level", "")))
+    classification = str(fields.get("classification", "")).strip()
+    parent = str(fields.get("parent_series_id", "")).strip()
+    description = (
+        f"{fields['dataset']}. Official UK Consumer Prices Index level, "
+        f"{_INDEX_REFERENCE[family]}; {level}"
+        + (f" {classification}" if classification else "")
+        + f"; native ONS identifier {native_id}"
+        + (f"; aggregated into {parent}" if parent else "")
+        + f". {fields['provenance']}."
+    )
     return {
         "series_id": series_id,
-        "name": f"UK CPI: {official_name}",
-        "description": (
-            f"Official ONS Consumer Prices Index level (2015=100), {scope} node {node}; "
-            f"native series identifier {native_id}."
-        ),
+        "name": f"UK CPI: {name}",
+        "description": description,
         "country": COUNTRY_CURRENCY,
         "frequency": frequency,
         "unit": unit,
         "eco_group": eco_group,
-        "source_url": SOURCE_URL,
+        "source_url": fields["source_url"],
     }
 
 
@@ -137,6 +197,7 @@ def build_metadata_rows(
     parsed_by_date: dict[date, dict[str, float | None]],
     aggregates: dict[str, dict[str, Any]],
     collected_at: datetime,
+    catalog: dict[str, dict[str, str]],
 ) -> list[dict[str, object]]:
     """Create one row for every extracted series present in the database."""
     series_ids = {series_id for values in parsed_by_date.values() for series_id in values}
@@ -146,7 +207,10 @@ def build_metadata_rows(
         aggregate = aggregates.get(series_id)
         if not aggregate:
             continue
-        row = _series_descriptive_row(series_id)
+        fields = catalog.get(series_id)
+        if fields is None:
+            raise ValueError(f"No upstream metadata was captured for {series_id}")
+        row = _series_descriptive_row(series_id, fields)
         row.update(
             first_observation=_as_date(aggregate["first_observation"]),
             last_observation=_as_date(aggregate["last_observation"]),
@@ -161,18 +225,19 @@ def build_metadata_rows(
 
 
 def upsert_metadata(
-    engine: Engine,
+    conn: Connection,
     parsed_by_date: dict[date, dict[str, float | None]],
-    collected_at: datetime | None = None,
+    collected_at: datetime,
+    catalog: dict[str, dict[str, str]],
 ) -> tuple[int, int]:
     """Insert new metadata and update only genuinely changed rows."""
-    collected_at = collected_at or datetime.now(UTC)
-    desired = build_metadata_rows(parsed_by_date, get_series_aggregates(engine), collected_at)
+    desired = build_metadata_rows(
+        parsed_by_date, get_series_aggregates(conn), collected_at, catalog
+    )
     logger.info("Metadata upsert: evaluating %d series", len(desired))
-    with engine.connect() as conn:
-        current_rows = (
-            conn.execute(text(f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE}")).mappings().all()
-        )
+    current_rows = (
+        conn.execute(text(f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE}")).mappings().all()
+    )
     current = {str(row["series_id"]): dict(row) for row in current_rows}
     inserts: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []
@@ -187,9 +252,8 @@ def upsert_metadata(
             for column in _COMPARABLE_COLUMNS
         ):
             updates.append(row)
-    with engine.begin() as conn:
-        merge = conn.dialect.name in _MERGE_DIALECTS
-        _write_batches(conn, inserts, "insert", merge=False)
-        _write_batches(conn, updates, "update", merge=merge)
+    merge = conn.dialect.name in _MERGE_DIALECTS
+    _write_batches(conn, inserts, "insert", merge=False)
+    _write_batches(conn, updates, "update", merge=merge)
     logger.info("Metadata upsert: inserted=%d updated=%d", len(inserts), len(updates))
     return len(inserts), len(updates)

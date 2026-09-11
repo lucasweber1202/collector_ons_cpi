@@ -13,13 +13,16 @@ from datetime import date
 
 import pytest
 
-from scripts.extract import _make_series_id
 from scripts.validate import build_hierarchy, validate_bottom_up
+from tests.conftest import catalog_entry
 
-PARENT = _make_series_id("COICOP", "ALL", "AAAA", "All items")
-CHILD_RISING = _make_series_id("COICOP", "D01", "BBBB", "Rising division")
-CHILD_FLAT = _make_series_id("COICOP", "D02", "CCCC", "Flat division")
-HIERARCHY = build_hierarchy([PARENT, CHILD_RISING, CHILD_FLAT])
+_PARENT = catalog_entry("COICOP", "ALL", "D7BT", "All items", level="all_items")
+_RISING = catalog_entry(
+    "COICOP", "D01", "D7BU", "Rising division", level="division", parent=_PARENT[0]
+)
+_FLAT = catalog_entry("COICOP", "D02", "D7BV", "Flat division", level="division", parent=_PARENT[0])
+PARENT, CHILD_RISING, CHILD_FLAT = _PARENT[0], _RISING[0], _FLAT[0]
+HIERARCHY = build_hierarchy(dict([_PARENT, _RISING, _FLAT]))
 
 WEIGHT_RISING = 400.0
 WEIGHT_FLAT = 600.0

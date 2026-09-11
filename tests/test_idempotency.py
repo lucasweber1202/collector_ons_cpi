@@ -2,82 +2,49 @@
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import date, datetime
-from pathlib import Path
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
-from scripts.extract import _make_series_id
 from scripts.metadata import upsert_metadata
 from scripts.run_logs import insert_run_log
 from scripts.time_series import get_max_reference_date, upsert_time_series
 from scripts.weights import upsert_weights
+from tests.conftest import catalog_entry
+
+_SERIES = catalog_entry("COICOP", "ALL", "D7BT", "CPI ALL ITEMS", level="all_items")
+SERIES_ID, CATALOG = _SERIES[0], dict([_SERIES])
+COLLECTED_AT = datetime(2026, 8, 19, 6, 0)  # noqa: DTZ001
 
 
-def _engine(tmp_path: Path):
-    main_path = tmp_path / "main.db"
-    schema_path = tmp_path / "collector.db"
-    engine = create_engine(
-        f"sqlite:///{main_path}",
-        connect_args={"detect_types": sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES},
-    )
+def test_second_write_is_data_noop_and_log_is_appended(engine: Engine) -> None:
+    observations: dict[date, dict[str, float | None]] = {
+        date(2026, 6, 1): {SERIES_ID: 142.5},
+        date(2026, 7, 1): {SERIES_ID: 142.933},
+    }
+    weights = {date(2026, 7, 1): {SERIES_ID: 1.0}}
 
-    @event.listens_for(engine, "connect")
-    def _attach(dbapi_connection, _connection_record) -> None:
-        dbapi_connection.execute(f"ATTACH DATABASE '{schema_path}' AS collector_ons_cpi")
+    for expected_new, expected_inserted in ((2, 1), (0, 0)):
+        with engine.begin() as conn:
+            assert upsert_time_series(conn, observations, COLLECTED_AT)[0] == expected_new
+            assert upsert_weights(conn, weights, COLLECTED_AT)[0] == (1 if expected_new else 0)
+            inserted, updated = upsert_metadata(conn, observations, COLLECTED_AT, CATALOG)
+            assert (inserted, updated) == (expected_inserted, 0)
+        insert_run_log(engine, COLLECTED_AT, COLLECTED_AT, "success", "ok", None)
 
-    with engine.begin() as conn:
-        conn.execute(
-            text("""CREATE TABLE collector_ons_cpi.time_series (
-            series_id TEXT NOT NULL, reference_date DATE NOT NULL, vintage_date DATE NOT NULL,
-            value REAL NOT NULL, collected_at TIMESTAMP NOT NULL,
-            PRIMARY KEY (series_id, reference_date, vintage_date))""")
-        )
-        conn.execute(
-            text("""CREATE TABLE collector_ons_cpi.weights (
-            series_id TEXT NOT NULL, reference_date DATE NOT NULL, vintage_date DATE NOT NULL,
-            weight REAL NOT NULL, collected_at TIMESTAMP NOT NULL,
-            PRIMARY KEY (series_id, reference_date, vintage_date))""")
-        )
-        conn.execute(
-            text("""CREATE TABLE collector_ons_cpi.metadata (
-            series_id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, country TEXT NOT NULL,
-            frequency TEXT, unit TEXT, first_observation DATE, last_observation DATE,
-            observation_count INTEGER NOT NULL, eco_group TEXT, source_url TEXT NOT NULL,
-            last_publish_date DATE, collected_at TIMESTAMP NOT NULL)""")
-        )
-        conn.execute(
-            text("""CREATE TABLE collector_ons_cpi.logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TIMESTAMP NOT NULL,
-            finished_at TIMESTAMP NOT NULL, status TEXT NOT NULL, log_text TEXT NOT NULL,
-            traceback TEXT)""")
-        )
-    return engine
-
-
-def test_second_write_is_data_noop_and_log_is_appended(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    series_id = _make_series_id("COICOP", "ALL", "D7BT", "CPI all items")
-    parsed = {date(2026, 7, 1): {series_id: 142.9}}
-    weights = {date(2026, 7, 1): {series_id: 1000.0}}
-    collected_at = datetime(2026, 8, 19, 7, 1)  # noqa: DTZ001 -- SQLite test adapter.
-
-    assert upsert_time_series(engine, parsed, collected_at) == (1, 0)
     assert get_max_reference_date(engine) == date(2026, 7, 1)
-    assert upsert_weights(engine, weights, collected_at) == (1, 0)
-    assert upsert_metadata(engine, parsed, collected_at) == (1, 0)
-    insert_run_log(engine, collected_at, collected_at, "success", "first", None)
-
-    assert upsert_time_series(engine, parsed, collected_at) == (0, 0)
-    assert upsert_weights(engine, weights, collected_at) == (0, 0)
-    assert upsert_metadata(engine, parsed, collected_at) == (0, 0)
-    insert_run_log(engine, collected_at, collected_at, "success", "second", None)
-
     with engine.connect() as conn:
         assert (
-            conn.execute(text("SELECT COUNT(*) FROM collector_ons_cpi.time_series")).scalar() == 1
+            conn.execute(text("SELECT COUNT(*) FROM collector_ons_cpi.time_series")).scalar_one()
+            == 2
         )
-        assert conn.execute(text("SELECT COUNT(*) FROM collector_ons_cpi.weights")).scalar() == 1
-        assert conn.execute(text("SELECT COUNT(*) FROM collector_ons_cpi.metadata")).scalar() == 1
-        assert conn.execute(text("SELECT COUNT(*) FROM collector_ons_cpi.logs")).scalar() == 2
+        assert conn.execute(text("SELECT COUNT(*) FROM collector_ons_cpi.logs")).scalar_one() == 2
+        row = conn.execute(
+            text(
+                "SELECT observation_count, first_observation, last_observation "
+                "FROM collector_ons_cpi.metadata"
+            )
+        ).one()
+    assert row[0] == 2
+    assert (str(row[1])[:10], str(row[2])[:10]) == ("2026-06-01", "2026-07-01")

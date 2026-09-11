@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import TextClause, bindparam, text
@@ -98,7 +98,7 @@ def get_max_reference_date(engine: Engine) -> date | None:
     return value
 
 
-def get_series_aggregates(engine: Engine) -> dict[str, dict[str, Any]]:
+def get_series_aggregates(conn: Connection) -> dict[str, dict[str, Any]]:
     """Return per-series first, last, distinct count, and latest collection."""
     sql = text(
         f"""SELECT series_id, MIN(reference_date) AS first_observation,
@@ -107,8 +107,7 @@ def get_series_aggregates(engine: Engine) -> dict[str, dict[str, Any]]:
         MAX(collected_at) AS last_collected_at
         FROM {_TABLE} GROUP BY series_id"""
     )
-    with engine.connect() as conn:
-        rows = conn.execute(sql).mappings().all()
+    rows = conn.execute(sql).mappings().all()
     return {str(row["series_id"]): dict(row) for row in rows}
 
 
@@ -136,7 +135,7 @@ def _incoming_rows(
 
 
 def _latest(
-    engine: Engine, series_ids: list[str], minimum_date: date
+    conn: Connection, series_ids: list[str], minimum_date: date
 ) -> dict[tuple[str, date], dict[str, Any]]:
     """Fetch latest vintages for a bounded series batch."""
     sql = text(
@@ -147,12 +146,9 @@ def _latest(
         FROM {_TABLE} WHERE reference_date >= :minimum_date AND series_id IN :series_ids) ranked
         WHERE rn = 1"""
     ).bindparams(bindparam("series_ids", expanding=True))
-    with engine.connect() as conn:
-        rows = (
-            conn.execute(sql, {"minimum_date": minimum_date, "series_ids": series_ids})
-            .mappings()
-            .all()
-        )
+    rows = (
+        conn.execute(sql, {"minimum_date": minimum_date, "series_ids": series_ids}).mappings().all()
+    )
     result: dict[tuple[str, date], dict[str, Any]] = {}
     for row in rows:
         ref = (
@@ -165,12 +161,11 @@ def _latest(
 
 
 def upsert_time_series(
-    engine: Engine,
+    conn: Connection,
     parsed_by_date: dict[date, dict[str, float | None]],
-    collected_at: datetime | None = None,
+    collected_at: datetime,
 ) -> tuple[int, int]:
     """Write new observations/revisions and return ``(new, new_vintages)``."""
-    collected_at = collected_at or datetime.now(UTC)
     today = collected_at.date()
     incoming = _incoming_rows(parsed_by_date, collected_at)
     logger.info("Time-series upsert: evaluating %d incoming observations", len(incoming))
@@ -188,7 +183,7 @@ def upsert_time_series(
     minimum_date = min(row["reference_date"] for row in incoming)
     for start in range(0, len(series_ids), SERIES_BATCH_SIZE):
         batch_ids = series_ids[start : start + SERIES_BATCH_SIZE]
-        existing = _latest(engine, batch_ids, minimum_date)
+        existing = _latest(conn, batch_ids, minimum_date)
         for series_id in batch_ids:
             for row in by_series[series_id]:
                 current = existing.get((series_id, row["reference_date"]))
@@ -211,10 +206,9 @@ def upsert_time_series(
                     inserts.append({**row, "vintage_date": today})
                     new_vintages += 1
 
-    with engine.begin() as conn:
-        merge = conn.dialect.name in _MERGE_DIALECTS
-        _write_batches(conn, inserts, "insert", merge=False)
-        _write_batches(conn, updates, "same-day update", merge=merge)
+    merge = conn.dialect.name in _MERGE_DIALECTS
+    _write_batches(conn, inserts, "insert", merge=False)
+    _write_batches(conn, updates, "same-day update", merge=merge)
     logger.info(
         "Time-series upsert: new=%d new_vintages=%d same_day_updates=%d",
         new_observations,
