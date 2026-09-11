@@ -20,6 +20,7 @@ from scripts.special_aggregates import (
     EX_CPI_SPECIAL_AGGREGATES,
     MM23SpecialPanel,
     parse_mm23_special_aggregates,
+    resolve_table38_alt_series,
 )
 
 MM23_VERSIONS_URL = (
@@ -213,6 +214,40 @@ def build_exclusion_weight_regimes(
         for month in range(2, 13):
             expanded[date(year, month, 1)] = dict(current_weights)
     return expanded
+
+
+def map_exclusion_weight_regimes_to_table38(
+    regimes: Mapping[date, Mapping[str, float]],
+    catalog: Mapping[str, Mapping[str, str]],
+) -> dict[date, dict[str, float]]:
+    """Map MM23 weight CDIDs onto the existing Table 38 ALT series identifiers.
+
+    The MM23 weight CDID identifies the basket mass, while this collector stores
+    the corresponding analytical index under its Table 38 `CPI_ALT_*` series_id.
+    The reviewed crosswalk links those two native CDIDs. Resolution is exact on
+    the index CDID; no name matching and no new series identifier are introduced.
+    """
+    resolved, missing = resolve_table38_alt_series(catalog)
+    if missing:
+        raise ValueError(
+            f"Cannot map MM23 exclusion weights; Table 38 ALT CDIDs missing: {missing}"
+        )
+    target_by_weight = {
+        aggregate["weight_cdid"]: resolved[aggregate["index_cdid"]]
+        for aggregate in EX_CPI_SPECIAL_AGGREGATES
+    }
+    mapped: dict[date, dict[str, float]] = {}
+    for month, values in regimes.items():
+        month_values: dict[str, float] = {}
+        for weight_cdid, series_id in target_by_weight.items():
+            value = values.get(weight_cdid)
+            if value is None:
+                raise ValueError(f"Missing {weight_cdid} MM23 exclusion weight at {month}")
+            if series_id in month_values:
+                raise ValueError(f"Two MM23 exclusion weights map to {series_id} at {month}")
+            month_values[series_id] = value
+        mapped[month] = month_values
+    return mapped
 
 
 def discover_mm23_snapshots() -> list[MM23Snapshot]:
