@@ -8,20 +8,28 @@ run.
 
 ## Scope
 
-This repository is the **UK CPI headline collector** only. The CPI exclusion
-special aggregates (the MM23 "CPI excluding ..." series) are a separate dataset
-and live in
-[`collector_ons_ex_cpi`](https://github.com/lucasweber1202/collector_ons_ex_cpi).
+This repository is the **UK CPI headline collector** only. The ten CPI exclusion
+special aggregates (the MM23 "CPI excluding ..." series) belong to
+[`collector_ons_ex_cpi`](https://github.com/lucasweber1202/collector_ons_ex_cpi)
+and are **not collected here**: Table 38 publishes them in the same sheet, so
+they are skipped by CDID while the catalog is built
+(`EXCLUSION_AGGREGATE_CDIDS` in `scripts/extract.py`). The other 41 analytical
+aggregates are unaffected, including the four complements whose names resemble
+the exclusions — Energy, Food, Alcohol & Tobacco; Energy & Non-processed Food;
+Energy & Seasonal Food; Education, Health & Social Protection.
+
 Nothing here imports or depends on that repository, and per the fleet rule
 neither may grow a shared package for the other. Do not add EX-CPI collection to
-this collector.
+this collector. See [COMPLIANCE.md](COMPLIANCE.md) for the reviewed CDID list,
+the measured impact and the cleanup plan for a database populated before the
+split.
 
 ## What it collects
 
 | Layer | Source | Series | History | Index reference |
 | --- | --- | ---: | --- | --- |
 | All items, COICOP divisions, groups and classes | detailed reference tables, Table 38 | 122 | Jan 1988 onwards | 2015=100 |
-| ONS analytical aggregates (energy, core, goods/services cuts) | detailed reference tables, Table 38 | 51 | Jan 1988 onwards | 2015=100 |
+| ONS analytical aggregates (goods/services and durability cuts) | detailed reference tables, Table 38 | 41 | Jan 1988 onwards | 2015=100 |
 | Consumption segments | consumption segment indices | 697 | Feb 2025 onwards | re-referenced each January |
 | Official basket weights, including weight-only subclasses | Annex A table W1-CPI | 319 codes | Jan 2008 onwards | parts per 1,000 |
 

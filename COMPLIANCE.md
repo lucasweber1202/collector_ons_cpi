@@ -10,12 +10,12 @@ is `PASS`, `FAIL`, or `SKIP` with the reason stated.
 
 `collector_ons_cpi` collects the published UK CPI index levels, the official
 basket weights and the consumption-segment layer. The CPI **exclusion special
-aggregates** (the MM23 "CPI excluding ..." series) are a separate dataset and
-live in their own repository, `lucasweber1202/collector_ons_ex_cpi`. Nothing in
-this repository reads, imports or depends on it, and the fleet rule against a
-shared core means neither repository may grow a common package for the other.
+aggregates** (the MM23 "CPI excluding ..." series) are a separate product owned
+by `lucasweber1202/collector_ons_ex_cpi`. Nothing in this repository reads,
+imports or depends on it, and the fleet rule against a shared core means neither
+repository may grow a common package for the other.
 
-Verified on 2026-09-14 against `origin/main` at `0f80765`:
+Verified on 2026-09-14 against `origin/main`:
 
 | Check | Result |
 | --- | --- |
@@ -27,9 +27,116 @@ Verified on 2026-09-14 against `origin/main` at `0f80765`:
 
 The earlier branch `feature/ex-cpi-special-aggregates-mapping` and its pull
 request [#7](https://github.com/lucasweber1202/collector_ons_cpi/pull/7) remain
-as history. PR #7 is **closed and was never merged**, and the branch now points
-at the same commit as `main`, so it carries no EX-CPI commits. It must not be
-merged into `main`; EX-CPI development continues in its own repository.
+as history. PR #7 is **closed and was never merged**, and the branch points at
+the same commit as `main`, so it carries no EX-CPI commits. It must not be
+merged into `main`.
+
+### Analytical-aggregate ownership, resolved 2026-09-14
+
+Table 38 publishes the ten exclusion aggregates in the same sheet as the
+aggregates this collector owns, so until this change both products collected
+them. That was duplicated **ownership**, not merely duplicated reading: two
+codebases maintained the same ten ONS series, and an ONS change would have had
+to be tracked in both, with no mechanism to keep them from diverging.
+
+The split is now explicit and enforced in code. `EXCLUSION_AGGREGATE_CDIDS` in
+`scripts/extract.py` names exactly ten CDIDs, which are skipped while the
+Table 38 catalog is built:
+
+| CDID | Series | Owner |
+| --- | --- | --- |
+| `DK9V` | CPI excluding tobacco | `collector_ons_ex_cpi` |
+| `DKC5` | CPI excluding energy | `collector_ons_ex_cpi` |
+| `DKC6` | Core CPI (excluding energy, food, alcohol and tobacco) | `collector_ons_ex_cpi` |
+| `DKC7` | CPI excluding energy and unprocessed food | `collector_ons_ex_cpi` |
+| `DKC8` | CPI excluding seasonal food | `collector_ons_ex_cpi` |
+| `DKC9` | CPI excluding energy and seasonal food | `collector_ons_ex_cpi` |
+| `DKD2` | CPI excluding alcohol and tobacco | `collector_ons_ex_cpi` |
+| `DKD3` | CPI excluding liquid fuels, vehicle fuels and lubricants | `collector_ons_ex_cpi` |
+| `DKD4` | CPI excluding housing, water, electricity, gas and other fuels | `collector_ons_ex_cpi` |
+| `DKD5` | CPI excluding education, health and social protection | `collector_ons_ex_cpi` |
+
+Everything else stays here: **41 analytical aggregates** remain, including the
+structural cuts (`D7F4` All Goods, `D7F5` All Services), the goods/services
+breakdowns, and the four "contributor" aggregates whose names resemble the
+exclusions but are their complements rather than exclusions —
+`DKD6` Energy, Food, Alcohol & Tobacco; `DKD7` Energy & Non-processed Food;
+`DKD8` Energy & Seasonal Food; `DKD9` Education, Health & Social Protection.
+Those four are **not** exclusion indices and were deliberately not transferred.
+
+Why removal was safe rather than merely tidy, measured on the populated database
+before the change:
+
+- all ten were **standalone roots**: none was a reconciliation parent, none was a
+  child of any parent, and no other series named one as its parent;
+- none carried a W1 basket weight (0 rows in `original_weights`);
+- each held only a `weight = 1.0` row in `weights`, contributing to no
+  weight-sum or bottom-up check.
+
+The reconciliation figures are byte-identical before and after the change —
+8,436 / 8,251 / 8,251 / 1,530 / 1,275 / 1,275 checks, 0 failures — which is the
+direct evidence that the ten contributed nothing to any validation.
+
+Measured impact on a fresh build:
+
+| | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| Table 38 series | 173 | 163 | −10 |
+| of which analytical aggregates | 51 | 41 | −10 |
+| of which COICOP | 122 | 122 | 0 |
+| Total series (with segments) | 870 | 860 | −10 |
+| `time_series` rows | 90,064 | 85,434 | −4,630 (10 × 463) |
+| `weights` rows | 48,694 | 46,464 | −2,230 (10 × 223) |
+| `original_weights` rows | 68,574 | 68,574 | **0** |
+| `metadata` rows | 870 | 860 | −10 |
+
+A Table 38 carrying only *some* of the ten stops the run: that means ONS renamed
+or withdrew one and the split no longer describes the source, which is a decision
+rather than a silently narrower exclusion. A sheet carrying none of them is not
+treated as drift, because that is a sheet which does not publish the product at
+all and the required-CDID gate already decides whether such a sheet is real.
+
+#### Cleanup plan for an already-populated database
+
+**Nothing is deleted automatically.** A database populated before this change
+still holds the ten series; the collector simply stops maintaining them, so they
+freeze at their last collected vintage. That is safe but misleading, so remove
+them deliberately, after confirming the consumer has moved to
+`collector_ons_ex_cpi`:
+
+```sql
+-- Inspect first: exactly ten series, and what would be removed.
+SELECT m.series_id, m.name, m.observation_count,
+       (SELECT count(*) FROM collector_ons_cpi.time_series t WHERE t.series_id = m.series_id) AS observations,
+       (SELECT count(*) FROM collector_ons_cpi.weights w WHERE w.series_id = m.series_id) AS weight_rows
+FROM collector_ons_cpi.metadata m
+WHERE split_part(m.series_id, '_', 4) IN
+      ('DK9V','DKC5','DKC6','DKC7','DKC8','DKC9','DKD2','DKD3','DKD4','DKD5')
+ORDER BY m.series_id;
+```
+
+The inspection must return exactly ten rows. If it returns more or fewer, stop:
+the database does not match this reviewed set. Then, with a backup taken as in
+"Step 0" below:
+
+```sql
+BEGIN;
+CREATE TEMP TABLE retired_series ON COMMIT DROP AS
+SELECT series_id FROM collector_ons_cpi.metadata
+WHERE split_part(series_id, '_', 4) IN
+      ('DK9V','DKC5','DKC6','DKC7','DKC8','DKC9','DKD2','DKD3','DKD4','DKD5');
+
+DELETE FROM collector_ons_cpi.weights     WHERE series_id IN (SELECT series_id FROM retired_series);
+DELETE FROM collector_ons_cpi.time_series WHERE series_id IN (SELECT series_id FROM retired_series);
+DELETE FROM collector_ons_cpi.metadata    WHERE series_id IN (SELECT series_id FROM retired_series);
+COMMIT;
+```
+
+`original_weights` is deliberately absent: these series never had a row there.
+Afterwards the four counts must fall by exactly 4,630 / 2,230 / 10 and the 41
+remaining analytical aggregates must be untouched. This deletion is **not**
+required for the collector to run correctly; an un-cleaned database is stale in
+those ten series only.
 
 ---
 
@@ -69,16 +176,17 @@ merged into `main`; EX-CPI development continues in its own repository.
   shared core, base class, ORM, migration framework or cross-repo import is
   introduced.
 
-## Source scope and evidence (replayed 2026-09-14, publication stamp 19 August 2026)
+## Source scope and evidence (rebuilt 2026-09-14, publication stamp 19 August 2026)
 
-Stored on a real PostgreSQL 16.13 database from a full historical build:
+Stored on a real PostgreSQL 16.13 database from a full historical build, after
+the exclusion aggregates were handed to `collector_ons_ex_cpi`:
 
 | Layer | Series | Observations | First | Last |
 | --- | ---: | ---: | --- | --- |
 | COICOP (all items, 12 divisions, 38 groups, 71 classes) | 122 | 54,516 | 1988-01-01 | 2026-07-01 |
-| ONS analytical aggregates | 51 | 23,410 | 1988-01-01 | 2026-07-01 |
+| ONS analytical aggregates (exclusion indices excluded) | 41 | 18,780 | 1988-01-01 | 2026-07-01 |
 | Consumption segments | 697 | 12,138 | 2025-02-01 | 2026-07-01 |
-| **Total** | **870** | **90,064** | | |
+| **Total** | **860** | **85,434** | | |
 
 Weights:
 
@@ -87,15 +195,15 @@ Weights:
 | `original_weights`, W1 codes | 56,436 | 319 | 2008-01-01 | 2026-12-01 |
 | `original_weights`, segment weights | 12,138 | 697 | 2025-02-01 | 2026-07-01 |
 | `weights`, COICOP operational shares | 27,206 | 122 | 2008-01-01 | 2026-07-01 |
-| `weights`, analytical roots at 1.0 | 11,373 | 51 | 2008-01-01 | 2026-07-01 |
+| `weights`, analytical roots at 1.0 | 9,143 | 41 | 2008-01-01 | 2026-07-01 |
 | `weights`, segment operational shares | 10,115 | 697 | 2025-03-01 | 2026-07-01 |
 
 Segment shares start in March and skip every January and February because the
 January re-reference leaves those links undefined at source; no share is
 invented for a month whose link does not exist.
 
-Only 122 of the 173 Table 38 series have mapped W1 COICOP basket weights; the
-51 analytical aggregates are overlapping cuts with no basket row. 192 W1
+Only 122 of the 163 Table 38 series have mapped W1 COICOP basket weights; the
+41 analytical aggregates are overlapping cuts with no basket row. 192 W1
 subclass rows and the merged/total rows have official weights and no published
 index: their weights are preserved and no index, metadata row or operational
 weight is fabricated for them. 697 consumption segments resolve onto 85 distinct
@@ -252,25 +360,28 @@ included, must be unchanged. Then run `python main.py --no-watch`; it must exit
 ### Rehearsal executed 2026-09-14
 
 This procedure was executed end to end against a **real populated PostgreSQL
-16.13 database** — a copy of the full live-source build described above, 870
-series and 90,065 observations across two vintages — after rewriting every
+16.13 database** — a copy of the full live-source build described above, 860
+series and 85,435 observations across two vintages — after rewriting every
 identifier into the superseded name-bearing spelling:
 
 | Step | Result |
 | --- | --- |
 | Detector before migration | refused the run, wrote one `error` log, wrote 0 rows |
 | Step 2 collision pre-check | 0 rows |
-| Step 3 apply | 870 mapped; 90,065 / 48,694 / 12,138 / 870 rows renamed |
+| Step 3 apply | 860 mapped; 85,435 / 46,464 / 12,138 / 860 rows renamed |
 | `CPI_W1_*` rows in `original_weights` | 56,436 before and after, untouched |
 | Row counts, distinct series, distinct vintages | unchanged |
-| `sum(value)` checksum | `9499174.834` before and after |
+| `sum(value)` checksum | `9091180.763` before and after |
 | Both vintages of a revised observation | both preserved, neither rewritten |
 | Legacy rows left / orphan observations | 0 / 0 |
 | `python main.py --no-watch` afterwards | exit `0`, zero writes on all four tables |
 
-**No production database has been migrated.** The rehearsal proves the procedure
-on real data of the real shape; running it against production remains an
-operator action, and gate 3 below stays open for that reason.
+The rehearsal was re-run after the exclusion-aggregate change, so these figures
+describe the procedure against the shape a production database will actually
+have. **No production database has been migrated.** The rehearsal proves the
+procedure on real data of the real shape; running it against production remains
+an operator action with no authorised, approved production database reachable
+from this environment, and gate 3 below stays open for that reason.
 
 ## Database upgrade safety
 
@@ -339,21 +450,22 @@ the strength of a previous session.
 | Gate | Status | Evidence |
 | --- | --- | --- |
 | Build/import | PASS | `python -m compileall -q main.py scripts tests` |
-| Type check | PASS | `python -m mypy` — 44 source files, no issues, under `disallow_untyped_defs`, `warn_unreachable`, `warn_unused_ignores`, `warn_redundant_casts`, `no_implicit_optional` |
+| Type check | PASS | `python -m mypy` — 45 source files, no issues, under `disallow_untyped_defs`, `warn_unreachable`, `warn_unused_ignores`, `warn_redundant_casts`, `no_implicit_optional` |
 | Ruff lint | PASS | `ruff check .` — clean on ruff 0.16.7, whose default rule set is wider than the one this repository was first written against |
-| Ruff format | PASS | `ruff format --check .` — 44 files already formatted |
-| Tests | PASS | 335 passed, 3 skipped (the live-source and Spark-grammar suites are opt-in) |
-| Live ONS source | PASS | `ONS_LIVE_TEST=1` replay against the source as published on 2026-09-14: two identical runs then an injected failure; 90,064 observations, 48,694 operational weights, 68,574 original weights, 870 metadata rows; every series' first, middle and last published value compared against the parsed source |
+| Ruff format | PASS | `ruff format --check .` — 45 files already formatted |
+| Tests | PASS | 340 passed, 3 skipped (the live-source and Spark-grammar suites are opt-in) |
+| Live ONS source | PASS | `ONS_LIVE_TEST=1` replay against the source as published on 2026-09-14: two identical runs then an injected failure; 85,434 observations, 46,464 operational weights, 68,574 original weights, 860 metadata rows; every series' first, middle and last published value compared against the parsed source |
 | Current source layout | PASS | Table 38, W1-CPI and the consumption-segment layouts all still satisfy their schema gates; see below |
 | Bottom-up reconciliation | PASS | six layers, 22,018 checks, 0 failures, 100% coverage on every layer; figures below |
 | Metadata audit | PASS | one series per published layer compared field by field against the live source; see below |
 | PostgreSQL 16.13 | PASS | fresh DDL, full live build, unchanged second run, same-day revision, later-day revision, injected mid-persistence failure; see below |
 | Idempotency | PASS | second run wrote 0 rows on all four tables and appended one `success` log |
 | Vintages | PASS | historical baseline, same-day correction, later revision, latest and as-of queries; see below |
-| `series_id` migration | PASS (rehearsal) / SKIP (production) | executed end to end on a real populated PostgreSQL 16.13 copy of the live build; no production database has been migrated |
+| `series_id` migration | PASS (rehearsal) / SKIP (production) | re-executed end to end on a real populated PostgreSQL 16.13 copy of the current build; no production database has been migrated |
 | Databricks execution | SKIP | no approved Databricks workspace, host or credentials are reachable from this environment |
 | Databricks SQL grammar | PASS | every emitted statement parsed by Spark 4.1.1's own SQL parser (see below) |
-| Live pilot comparison | SKIP | `guimasuko/collector_template` is not reachable from this session; see below |
+| Live pilot comparison | SKIP | `guimasuko/collector_template` is not reachable from this session; every access path re-tried 2026-09-14 and listed below |
+| Analytical-aggregate ownership | PASS | the ten exclusion CDIDs handed to `collector_ons_ex_cpi`, 41 aggregates retained, impact measured; see above |
 | Security review | PASS | see below |
 | Diff review | PASS | full diff reviewed; no secret, `.env`, debug print, generated workbook or binary committed |
 
@@ -364,7 +476,9 @@ the source as published today and reproduced it exactly:
 
 - **Table 38** — layout rows 4/5/6 still label aggregate number, CDID and name;
   all six required CDIDs (`D7BT`, `D7BU`, `D7C2`, `D7C7`, `D7F4`, `D7F5`) still
-  published; 173 series and 463 months, both above their floors.
+  published; 173 series published and 463 months, both above their floors. 163
+  are collected here; the ten exclusion aggregates are skipped by CDID and all
+  ten were present, so the ownership split still matches the source.
 - **W1-CPI** — the header still decodes January and February–December regimes,
   the classified-row and regime floors both hold, and the overall-index row is
   exactly 1,000.000 points per thousand in every regime.
@@ -436,21 +550,21 @@ Executed 2026-09-14 on PostgreSQL 16.13, from an empty cluster:
 - `python -m scripts.init_db` created five tables in `collector_ons_cpi` with
   `double precision`, bounded `character varying`, `date`, `timestamp` and a
   `bigint` identity key on `logs`.
-- The fresh build wrote 90,064 observations, 68,574 original weights, 48,694
-  operational weights and 870 metadata rows, and exited `0`.
+- The fresh build wrote 85,434 observations, 68,574 original weights, 46,464
+  operational weights and 860 metadata rows, and exited `0`.
 - An immediate second run wrote **0** observations, 0 vintages, 0 operational
   weights, 0 original weights, 0 metadata inserts and 0 metadata updates, and
   appended one `success` log row (two `success` rows in total).
 - **Same-day correction.** Corrupting one stored value in each of the four
   tables and re-running produced exactly one same-day `UPDATE` per table — the
   PostgreSQL `MERGE` path — repaired every value, added no rows (`time_series`
-  stayed at 90,064) and left the database at a single `vintage_date`.
+  stayed at 85,434) and left the database at a single `vintage_date`.
 - **Later revision.** Backdating every vintage by three days and corrupting one
-  observation produced one **new vintage row** rather than an update: 90,065
+  observation produced one **new vintage row** rather than an update: 85,435
   rows across two `vintage_date` values, with the older vintage's value left
   exactly as it was. No older vintage is ever overwritten.
 - **Latest and as-of queries.** The canonical latest-vintage query returns one
-  row per `(series_id, reference_date)` — 90,064 rows for 90,064 distinct keys —
+  row per `(series_id, reference_date)` — 85,434 rows for 85,434 distinct keys —
   and returns the corrected value. The same query with
   `WHERE vintage_date <= DATE '2026-09-12'` returns the superseded value, so the
   history is genuinely queryable as of a past date.
@@ -461,7 +575,7 @@ Executed 2026-09-14 on PostgreSQL 16.13, from an empty cluster:
   traceback.
 - `log_text` truncation is visible: the error run's log ends with
   `[..., truncated ...]` at 65,535 characters.
-- Output sanity on the stored database: 870 metadata rows, 0 with
+- Output sanity on the stored database: 860 metadata rows, 0 with
   `observation_count <= 0`, 0 null first/last observations, 0 null or empty
   `source_url`, 0 duplicate `(series_id, reference_date, vintage_date)` triples,
   0 null or non-finite values, 0 operational weights outside `[0, 1]`, one
@@ -527,7 +641,7 @@ Those still require the Databricks execution gate below, which remains SKIP.
 
 `tests/` is justified by this collector's parsing, hierarchy, vintage, weight,
 mathematical-transformation, release-polling and forecast-target validation
-logic. 335 committed tests cover: stable identifiers and the legacy-identifier
+logic. 340 committed tests cover: stable identifiers and the legacy-identifier
 guard; deterministic weights-workbook selection across years, orders, absence
 and rename; Table 38, W1 and consumption-segment schema drift; consumption
 segment classification in both published layouts, the classification framework's
@@ -536,7 +650,9 @@ unresolvable codes; index-without-weight and weight-without-index; the January
 chain link and the February–December regime; ground-truth bottom-up
 reconstruction for both layers; operational weight reproduction; original-weight
 preservation and regime years; same-day and later-day vintages; two-run
-idempotency; mid-persistence failure rollback; release polling and the
+idempotency; mid-persistence failure rollback; the exclusion-aggregate
+ownership split, including a partially withdrawn set and a sheet that publishes
+none of them; release polling and the
 routing around it (an empty database builds history without entering the
 watch loop, an explicit start date is anchored to the preceding December, a
 populated database waits for the next expected month, and a timeout is a
@@ -559,97 +675,169 @@ therefore cannot leave the documentation quietly wrong.
    in an approved Databricks workspace, and confirm the Unity Catalog path,
    catalog/schema creation or the expected permission error, Delta table
    behaviour, named-parameter binding, `MERGE` row semantics and idempotency.
-   **SKIP — no approved Databricks workspace, host or credentials are reachable
-   from this environment.** It is never marked PASS. Everything reachable
-   statically has been done instead: every emitted statement is parsed by Spark
-   4.1.1's own SQL parser, and the portability gate rejects PostgreSQL-only
-   syntax, unbound literals, cross-schema references and any `MERGE` that leans
-   on an unenforced primary key. That narrows the open risk to runtime and
-   catalog semantics, not syntax.
+   **SKIP — no approved Databricks workspace/credentials.** Re-probed
+   2026-09-14: no `DBX_SERVER_HOSTNAME`/`DBX_HTTP_PATH`/`DATABRICKS_TOKEN`/
+   `AKV_VAULT_URL` in the environment, no `~/.databrickscfg`, and no reachable
+   workspace host. It is never marked PASS. Everything reachable statically has
+   been done instead: every emitted statement is parsed by Spark 4.1.1's own SQL
+   parser, and the portability gate rejects PostgreSQL-only syntax, unbound
+   literals, cross-schema references and any `MERGE` that leans on an unenforced
+   primary key. That narrows the open risk to runtime and catalog semantics, not
+   syntax.
 
 2. **Live pilot comparison against `guimasuko/collector_template`.**
-   **SKIP — the repository is not reachable from this session.** This was
-   re-attempted on 2026-09-14 and the exact failures were:
-   `add_repo` refuses the attachment (`cross-tier adds are not supported in v1`,
-   because the session already holds repositories owned by `lucasweber1202`);
-   the GitHub API tool answers `Access denied: repository ... is not configured
-   for this session`; the workspace repository listing returns no repository
-   matching `template`; and an anonymous `git clone` is refused with
-   `could not read Username for 'https://github.com'`. The template is therefore
-   private to another owner and cannot be attached here — it is not a matter of
-   having failed to look.
+   **SKIP — the repository is not reachable from this session.** Every access
+   path was re-tried on 2026-09-14 and each failed:
 
-   What was compared instead, in full, is the authority that **is** reachable:
-   `lucasweber1202/Coletores/MASTER_MACRO_COLLECTOR_GUIDELINES.md`, which the
-   fleet declares the consolidated contract that overrides stale examples. The
-   structural and behavioural comparison against it is recorded in "Comparison
-   against the reachable fleet authority" below. `.github/` was re-diffed
-   byte-for-byte against the governance repository on 2026-09-14 and every file
-   under `.github/skills/` and `.github/prompts/` is identical. Re-run the
-   template comparison when the repository is attachable.
+   | Path | Result |
+   | --- | --- |
+   | `add_repo` | `cross-tier adds are not supported in v1` — the session holds `lucasweber1202` repositories and cannot attach another owner's |
+   | GitHub API tool | `Access denied: repository ... is not configured for this session` |
+   | Workspace repository listing | ten repositories, all `lucasweber1202/*`; nothing matching `template` |
+   | `WebFetch https://github.com/guimasuko/collector_template` | HTTP 404 |
+   | anonymous `git clone` / `git ls-remote` | `could not read Username for 'https://github.com'` |
+   | `codeload.github.com` tarball | HTTP 403 |
 
-3. **`series_id` migration against a production database.** The procedure is now
-   executable rather than a sketch, and was rehearsed end to end on a real
-   populated PostgreSQL 16.13 database (see "Rehearsal executed 2026-09-14").
-   **No production database has been migrated**, so this remains an operator
-   action.
+   The repository is private to another owner and cannot be attached here. The
+   root `GUIDELINES.md` and `FORECAST_TARGET_GUIDELINES.md` are equally
+   unavailable: they are not in the governance repository either.
+
+   The comparison was therefore executed in full against the authority that **is**
+   reachable — `MASTER_MACRO_COLLECTOR_GUIDELINES.md`, which the fleet declares
+   the consolidated contract overriding stale examples — and is tabulated under
+   "Structural and behavioural comparison" below. It found and fixed one
+   GUIDELINE DRIFT. `.github/` was re-diffed byte-for-byte against the governance
+   repository and every file under `.github/skills/` and `.github/prompts/` is
+   identical. This gate stays SKIP because the pilot's concrete files could still
+   differ from the guideline prose in ways the prose does not describe.
+
+3. **`series_id` migration against a production database.** The procedure is
+   executable rather than a sketch and was re-rehearsed end to end on a real
+   populated PostgreSQL 16.13 database matching the current shape (see
+   "Rehearsal executed 2026-09-14"). **SKIP — production migration not
+   executed**; no authorised, approved production database is reachable from
+   this environment, so this remains an operator action.
 
 4. **Legacy-weights rebuild against real pre-existing data.** A database written
    by a version that stored official points per thousand in `weights` is
    detected and refused, but the archival and full-history rebuild has not been
    executed against real legacy data.
 
-5. **Consumption-segment history before February 2025.** ONS published item
+5. **Exclusion-aggregate cleanup on an already-populated database.** The
+   collector no longer maintains the ten exclusion aggregates, but a database
+   populated before this change still holds them, frozen at their last vintage.
+   The reviewed deletion is documented above and is deliberately **not**
+   executed automatically.
+
+6. **Consumption-segment history before February 2025.** ONS published item
    indices, a deeper and differently classified level, before the consumption
    segment product began. They are deliberately not stitched into the segment
    series. Extending coverage backwards is a separate, scoped decision.
 
-6. **Intake status.** The UK CPI row in
-   `lucasweber1202/Coletores/intake/collector_demands.csv` should read
-   `verification` with the next action naming gates 1–4 above. That repository is
-   not writable from this session (it is not attached and `add_repo` was not
-   authorised for it), so the revised row is supplied in the final report for an
-   operator to apply. It stays `verification` rather than `ready` precisely
-   because gates 1 and 3 are unexecuted.
+7. **`collector_ons_ex_cpi` currency code.** That collector emits `GBR` where the
+   fleet vocabulary is the ISO 4217 code `GBP`. The guideline and the intake
+   backlog were corrected in the governance repository; the constant in that
+   collector and any populated `metadata.country` still have to be changed in
+   its own repository.
 
 Because gates 1 and 3 are open, this collector must **not** be described as
 "100% production-certified". It is verified end to end on PostgreSQL against the
 live source; Databricks execution and the production identifier migration remain
 outstanding.
 
-### Comparison against the reachable fleet authority
+### Structural and behavioural comparison
 
-Executed 2026-09-14 against `MASTER_MACRO_COLLECTOR_GUIDELINES.md` (sections 4–11
-and the section 19 checklist), since the template repository itself is
-unreachable. Divergences are classified, not silently normalised.
+`guimasuko/collector_template` is **not reachable from this session**, so the
+comparison below is against the reachable authority: the fleet's consolidated
+contract `MASTER_MACRO_COLLECTOR_GUIDELINES.md`, which the governance repository
+declares authoritative over stale examples in any individual file. The root
+`GUIDELINES.md` and `FORECAST_TARGET_GUIDELINES.md` that the master guideline
+cross-references do not exist in the governance repository either, so those two
+authorities are likewise unavailable and their content is only reachable through
+the master guideline that consolidates them.
 
-| Area | Guideline | This collector | Classification |
-| --- | --- | --- | --- |
-| Repository layout | `main.py` at root, flat `scripts/`, no `core/`/`lib/`/`utils/` | matches; one extra flat module `scripts/segments.py` | ACCEPTABLE LOCAL EXTENSION — a second ONS dataset with its own status, index reference and two layouts |
-| Repository/schema name | `collector_<source>_<dataset>` == `SCHEMA_NAME` | `collector_ons_cpi` both | match |
-| `metadata` DDL | 13 columns, PK `series_id` | identical, column for column | match |
-| `time_series` DDL | 5 columns, PK `(series_id, reference_date, vintage_date)` | identical | match |
-| `logs` DDL | identity `id`, bounded text | identical | match |
-| 64-bit float spelling | "use the common subset" | `DOUBLE PRECISION` on PostgreSQL, `DOUBLE` on Databricks | REQUIRED SOURCE-SPECIFIC EXCEPTION — the two dialects share no spelling; `FLOAT` would silently halve precision on Databricks |
-| `weights` | approved forecast-target table | present, holds operational shares | match |
-| `original_weights` | PK `series_id` | PK `(series_id, reference_date, vintage_date)` | REQUIRED EXCEPTION, user-approved — a series-only key cannot hold two ONS regimes or a revision, which the guideline itself says must not be improvised away |
-| Vintage semantics | insert-on-first-sight, same-day update, later revision as a new row, 10-decimal compare | implemented exactly; verified on PostgreSQL | match |
-| Latest-value query | canonical `ROW_NUMBER()` form | identical, shipped in this file | match |
-| Databricks engine | pilot file byte-for-byte, three-step token resolution | unchanged, and the `pyspark` guard's `type: ignore` is preserved by a targeted mypy override | match |
-| Environment handling | manual `.env` parse, no `python-dotenv` | manual parse in `scripts/config.py` | match |
-| Run logs | written in `main.py`'s `finally`, best-effort, truncated | match; failure to log never hides the pipeline error | match |
-| Idempotency | second unchanged run writes nothing, still logs | verified: 0/0/0/0 writes, one `success` row | match |
-| Release monitoring | empty DB builds now, populated DB polls, timeout is success | implemented; now covered by `tests/test_release_modes.py` | match |
-| HTTP | one managed client, timeout, bounded retry/backoff, no redirects | single `http_get` with host allowlist, `Retry-After`, rate-limit backoff and a download ceiling | match |
-| SQL style | `sqlalchemy.text` with named parameters, no ORM | match; the only interpolated identifiers are module constants | match |
-| Dependencies | minimal, mirrored, no `requests`/`python-dotenv`/ORM/migrations | mirrored and enforced by `tests/test_dependencies.py`; none of the banned packages present | match |
-| Code style | future annotations, type hints, module docstrings, no `print` | match, under `disallow_untyped_defs` | match |
-| Verification loop | Phase 8 checklist | every applicable box executed above except the two open gates | match |
+Executed 2026-09-14 against sections 4–11 and the section 19 checklist.
 
-No DEAD/LEGACY code and no BLOCKER remains open. One drift found and fixed in
-this pass is recorded below.
+| Area | Template / guideline | CPI today | Classification | Action |
+| --- | --- | --- | --- | --- |
+| Repository name / schema | `collector_<source>_<dataset>`, `SCHEMA_NAME` identical | `collector_ons_cpi` both | MATCH | none |
+| Root layout | `main.py` at root, flat `scripts/`, no `core/`/`lib/`/`utils/`/`common/` | matches exactly | MATCH | none |
+| Extra module | `extract.py` under ~400 lines, split only if the source forces it and it is documented | `scripts/segments.py` is a second flat module | ACCEPTABLE LOCAL EXTENSION | none — a second ONS dataset with its own statistical status, index reference and two published layouts; documented above |
+| `.github/`, `.vscode/`, `.gitignore` | copied verbatim from the pilot | re-diffed byte-for-byte against the governance repository; `.github/skills/` and `.github/prompts/` identical | MATCH | none |
+| `metadata` DDL | 13 columns, PK `series_id` | identical, column for column | MATCH | none |
+| `time_series` DDL | 5 columns, PK `(series_id, reference_date, vintage_date)` | identical | MATCH | none |
+| `logs` DDL | identity `id`, bounded text, `status` success/error | identical | MATCH | none |
+| `weights` DDL | approved forecast-target table | identical | MATCH | none |
+| `original_weights` DDL | PK `series_id` | PK `(series_id, reference_date, vintage_date)`, plus `weight_base_year` | REQUIRED UK EXCEPTION | none — a series-only key cannot hold two ONS regimes or a revision; §11.2 itself forbids improvising that away and requires approval, which is recorded |
+| 64-bit float spelling | "common subset of both dialects" | `DOUBLE PRECISION` on PostgreSQL, `DOUBLE` on Databricks | REQUIRED UK EXCEPTION | none — the dialects share no spelling and `FLOAT` would silently halve precision on Databricks |
+| Standardized columns | no unauthorized additions | none added | MATCH | none |
+| Vintage semantics | first sight → today; identical → no-op; changed later → new row; changed same day → update today's row only; 10-decimal compare; drop non-finite | implemented exactly, verified on PostgreSQL | MATCH | none |
+| Latest-value query | canonical `ROW_NUMBER()` form | identical, shipped in this file | MATCH | none |
+| `config.py` | manual `.env` parse, no `python-dotenv`, credentials read once | matches | MATCH | none |
+| `db.py` | `build_engine()`, Databricks in PROD, `pool_pre_ping`, redacted URL, no DDL | matches | MATCH | none |
+| `databricks_engine.py` | pilot file byte-for-byte, three-step token resolution | unchanged; its pyspark `type: ignore` preserved by a targeted mypy override | MATCH | none |
+| `init_db.py` | owns all DDL, runnable as `python -m scripts.init_db` | matches | MATCH | none |
+| `extract.py` contract | `parse_series_id()`, `collect_raw_data(start_date)`, one managed client, allowlist, bounded retry | matches; `collect_weights` and the segment collector are source-specific additions | MATCH | none |
+| `time_series.py` | latest-vintage fetch, 500-row multi-row batches, `get_max_reference_date`, `get_series_aggregates` | matches | MATCH | none |
+| `metadata.py` | derived from parsed id + verified upstream fields, post-write aggregates, batched MERGE | matches | MATCH | none |
+| `run_logs.py` | best-effort, truncated, never masks the pipeline error | matches | MATCH | none |
+| `main.py` order | args → logging → preflight → engine → init_db → start date → collect → time_series → metadata → `finally` log | matches | MATCH | none |
+| Series IDs | uppercase, underscore-separated coarse→fine, unique, round-trippable, no opaque native id as the whole id | `CPI_{family}_{node}_{native}` | MATCH | none |
+| Controlled vocabulary | local `frozenset` validated at metadata build | `FREQUENCIES`/`UNITS`/`ECO_GROUPS` enforced | MATCH | none |
+| `metadata.country` | ISO 4217 currency code | `GBP` | MATCH | none — see the currency audit below |
+| Idempotency | second unchanged run writes nothing, still logs | verified 0/0/0/0 + one `success` row | MATCH | none |
+| Release monitoring | empty DB builds now, populated DB polls, timeout is a logged success | implemented; covered by `tests/test_release_modes.py` | MATCH | none |
+| Forecast-target weights | official weights preserved untouched, derived weights separate and reproducible | `original_weights` vs `weights`, verified on the database | MATCH | none |
+| Validation workbook | sheets mirroring stored datasets | `--export-validation` produces seven sheets | MATCH | none |
+| HTTP | one client, timeout, bounded retry/backoff, no arbitrary redirects, no `requests` | single `http_get` with host allowlist, `Retry-After`, rate-limit backoff, download ceiling | MATCH | none |
+| SQL style | `sqlalchemy.text` + named parameters, no ORM | matches; only module constants are interpolated | MATCH | none |
+| Dependencies | minimal, mirrored, no `requests`/`python-dotenv`/ORM/Alembic/Pydantic | mirrored and enforced by `tests/test_dependencies.py` | MATCH | none |
+| Code style | future annotations, type hints, module docstrings, no `print`, no silent broad except | matches under `disallow_untyped_defs` | MATCH | none |
+| Duplicate series | "reject duplicates" | ten exclusion aggregates were collected here **and** by `collector_ons_ex_cpi` | **GUIDELINE DRIFT** | **fixed** — handed to `collector_ons_ex_cpi` by CDID; 41 aggregates retained; see the ownership section |
+| Verification loop | Phase 8 checklist | every applicable box executed; two gates remain SKIP with reasons | MATCH | none |
+
+One GUIDELINE DRIFT was found and fixed. No BLOCKER and no DEAD/LEGACY code
+remains. No REQUIRED UK EXCEPTION was removed.
+
+**What this comparison cannot establish:** whether the template's *concrete
+files* differ from the guideline text in ways the guideline does not describe —
+a helper the pilot ships that this collector lacks, or a DDL detail where the
+pilot and the prose disagree. The guideline states the pilot is the structural
+reference and that fleet-wide files are copied from it byte-for-byte, so that
+residual risk is real and is why this gate stays SKIP rather than PASS.
+
+### Currency vocabulary audit
+
+`metadata.country` is the **ISO 4217 currency code**, not an ISO 3166 country
+code. Evidence: the master guideline's own examples are `BRL`, `USD`, `MXN`, all
+currencies, and the intake backlog's column is `country_or_currency_code` with
+`GBP` for UK CPI and `RUB` for Russia CPI.
+
+This collector emits `GBP` and is correct; no change was made here. The audit
+did find a governance inconsistency: `collector_ons_ex_cpi` emits `GBR`, the
+ISO 3166 code for the same country, and the intake backlog recorded `GBR` for
+that row. The ambiguity came from the guideline itself, which described the
+field as a "currency/country code" in one place while giving only currency
+examples in another. The minimal standardization was applied in the governance
+repository rather than by editing another collector from here: the master
+guideline now states the vocabulary is ISO 4217 and that `GBR`/`BRA`/`USA` are
+not fleet values, the intake request template asks for the currency code
+explicitly, and the EX-CPI intake row is corrected to `GBP` with a `next_action`
+naming the constant that still has to be changed in that repository.
 
 ### Drift found and fixed on 2026-09-14
+
+- **Duplicated ownership of the ten exclusion aggregates.** They were collected
+  here and by `collector_ons_ex_cpi`, so the same ten ONS series were maintained
+  by two codebases with nothing keeping them from diverging. Handed to
+  `collector_ons_ex_cpi` by CDID, with the 41 other analytical aggregates
+  retained and the impact measured; see the ownership section above.
+- **`country` vocabulary was ambiguous fleet-wide.** The guideline called the
+  field a "currency/country code" in one place and gave only currency examples
+  in another, which is how `collector_ons_ex_cpi` came to emit `GBR`. Corrected
+  in the governance repository; this collector's `GBP` was already right and was
+  not changed.
+
 
 - **Lint gate was not reproducible.** `ruff` is declared as `>=0.6`, and ruff
   0.16 widened its default rule set and began linting and formatting Python
