@@ -6,6 +6,16 @@ official basket weights, the derived weights needed to rebuild every published
 aggregate, and a reconciliation of each aggregate against its children on every
 run.
 
+## Scope
+
+This repository is the **UK CPI headline collector** only. The CPI exclusion
+special aggregates (the MM23 "CPI excluding ..." series) are a separate dataset
+and live in
+[`collector_ons_ex_cpi`](https://github.com/lucasweber1202/collector_ons_ex_cpi).
+Nothing here imports or depends on that repository, and per the fleet rule
+neither may grow a shared package for the other. Do not add EX-CPI collection to
+this collector.
+
 ## What it collects
 
 | Layer | Source | Series | History | Index reference |

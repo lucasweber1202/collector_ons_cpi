@@ -40,8 +40,8 @@ from scripts.config import DOWNLOAD_DELAY
 from scripts.extract import (
     W1_ALIASES,
     build_client,
-    http_get,
     expand_classification_code,
+    http_get,
     make_series_id,
 )
 

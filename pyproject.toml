@@ -49,3 +49,8 @@ warn_unused_ignores = false
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Ruff 0.16 began linting and formatting Python fenced inside Markdown. The
+# Markdown here is either fleet-wide VERBATIM content copied from the governance
+# repository (.github/) or prose whose snippets are quoted source, so neither may
+# be rewritten to suit a formatter. Ruff owns this repository's Python only.
+extend-exclude = ["*.md"]
