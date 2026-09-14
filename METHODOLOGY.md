@@ -295,6 +295,15 @@ regimes.
   segments, as above.
 - The ONS analytical aggregates are overlapping cuts and are not reconciled
   bottom-up; they receive operational weight 1.0 as standalone roots.
+- The ten CPI exclusion ("CPI excluding ...") aggregates published in the same
+  Table 38 sheet are **not** collected here: they belong to
+  `collector_ons_ex_cpi`, which also stores their MM23 exclusion and complement
+  weights. All of them were standalone roots, so the reconciliation figures
+  above are unchanged by the split. The 41 aggregates that remain include the
+  contributor series whose names resemble the exclusions — `DK9T` Energy,
+  `DKD6` Energy, Food, Alcohol & Tobacco, `DKD7` Energy & Non-processed Food,
+  `DKD8` Energy & Seasonal Food and `DKD9` Education, Health & Social
+  Protection — which are complements, not exclusion indices.
 
 ## Audit workbook
 

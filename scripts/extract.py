@@ -64,6 +64,34 @@ TABLE38_PROVENANCE = (
 )
 W1_DATASET = "ONS consumer price inflation updating weights, Annex A table W1-CPI"
 
+# Table 38 also publishes the ten CPI exclusion ("special aggregate") indices.
+# They are a separate product with a separate owner: collector_ons_ex_cpi stores
+# them together with their MM23 exclusion and complement weights, the complement
+# crosswalk, the published 12-month rates used for independent validation, and
+# the 2017-onwards January regime. This collector stored only the bare level, so
+# keeping them here duplicated ownership of the same ONS series across two
+# codebases without adding anything the other product does not already hold.
+#
+# They are excluded by CDID, the stable native ONS identifier that
+# collector_ons_ex_cpi also keys on, so an ONS title edit cannot resurrect one.
+# Every one of them is a standalone overlapping cut: none is a reconciliation
+# parent or child, none carries a W1 basket weight, and none contributes to any
+# bottom-up or weight-sum check. The other analytical aggregates are unaffected.
+EXCLUSION_AGGREGATE_CDIDS = frozenset(
+    {
+        "DK9V",  # CPI excluding tobacco
+        "DKC5",  # CPI excluding energy
+        "DKC6",  # Core CPI (excluding energy, food, alcohol and tobacco)
+        "DKC7",  # CPI excluding energy and unprocessed food
+        "DKC8",  # CPI excluding seasonal food
+        "DKC9",  # CPI excluding energy and seasonal food
+        "DKD2",  # CPI excluding alcohol and tobacco
+        "DKD3",  # CPI excluding liquid fuels, vehicle fuels and lubricants
+        "DKD4",  # CPI excluding housing, water, electricity, gas and other fuels
+        "DKD5",  # CPI excluding education, health and social protection
+    }
+)
+
 # Explicit W1 combined/split classifications verified against Table 38 CDIDs.
 # ONS publishes one index for a merged class; only the workbook code states which
 # component classes the merged index covers.
@@ -484,6 +512,7 @@ def parse_cpi_workbook(
     catalog: dict[str, dict[str, str]] = {}
     column_ids: dict[int, str] = {}
     cdids: set[str] = set()
+    excluded: set[str] = set()
     for column in range(TABLE38_FIRST_SERIES_COLUMN, len(frame.columns)):
         raw_code = cell_text(frame.iat[TABLE38_CODE_ROW, column])
         native = cell_text(frame.iat[TABLE38_CDID_ROW, column])
@@ -492,6 +521,10 @@ def parse_cpi_workbook(
             continue
         family, node, level = _node_token(raw_code)
         native_id = native.upper()
+        if native_id in EXCLUSION_AGGREGATE_CDIDS:
+            # Owned by collector_ons_ex_cpi; see EXCLUSION_AGGREGATE_CDIDS.
+            excluded.add(native_id)
+            continue
         series_id = make_series_id(family, node, native_id)
         if series_id in catalog:
             raise ValueError(f"Table 38 publishes {series_id} in two columns")
@@ -527,6 +560,20 @@ def parse_cpi_workbook(
             parsed[ref_date] = values
 
     _assert_table38_layout(frame, cdids, months)
+    # A workbook that carries some but not all of the reserved exclusion
+    # aggregates means ONS renamed or withdrew one of them, so the split between
+    # this collector and collector_ons_ex_cpi no longer describes the source.
+    # That needs a decision, not a silently narrower exclusion. A workbook that
+    # carries none of them is not evidence of drift -- it is a sheet that does
+    # not publish the product at all -- and the required-CDID gate above already
+    # decides whether such a sheet is the real Table 38.
+    if excluded and excluded != EXCLUSION_AGGREGATE_CDIDS:
+        raise ValueError(
+            "Table 38 publishes only part of the exclusion aggregates reserved for "
+            f"collector_ons_ex_cpi (missing {sorted(EXCLUSION_AGGREGATE_CDIDS - excluded)}); "
+            "re-review the ownership split before collecting"
+        )
+    logger.info("Excluded %d CPI exclusion aggregates owned by collector_ons_ex_cpi", len(excluded))
     if not parsed:
         raise ValueError("Table 38 contained no usable CPI observations")
     _link_coicop_parents(catalog)
