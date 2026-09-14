@@ -464,7 +464,7 @@ the strength of a previous session.
 | `series_id` migration | PASS (rehearsal) / SKIP (production) | re-executed end to end on a real populated PostgreSQL 16.13 copy of the current build; no production database has been migrated |
 | Databricks execution | SKIP | no approved Databricks workspace, host or credentials are reachable from this environment |
 | Databricks SQL grammar | PASS | every emitted statement parsed by Spark 4.1.1's own SQL parser (see below) |
-| Live pilot comparison | SKIP | `guimasuko/collector_template` is not reachable from this session; every access path re-tried 2026-09-14 and listed below |
+| Direct collector-template comparison | PASS | Compared `GUIDELINES.md`, `FORECAST_TARGET_GUIDELINES.md`, template tree and fleet skill/configuration structure at pinned template tree `8e4613b36c2808a7de234934a81bb26f7a22d367`; no blocker or minor drift |
 | Analytical-aggregate ownership | PASS | the ten exclusion CDIDs handed to `collector_ons_ex_cpi`, 41 aggregates retained, impact measured; see above |
 | Security review | PASS | see below |
 | Diff review | PASS | full diff reviewed; no secret, `.env`, debug print, generated workbook or binary committed |
