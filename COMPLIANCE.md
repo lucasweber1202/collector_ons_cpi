@@ -464,7 +464,7 @@ the strength of a previous session.
 | `series_id` migration | PASS (rehearsal) / SKIP (production) | re-executed end to end on a real populated PostgreSQL 16.13 copy of the current build; no production database has been migrated |
 | Databricks execution | SKIP | no approved Databricks workspace, host or credentials are reachable from this environment |
 | Databricks SQL grammar | PASS | every emitted statement parsed by Spark 4.1.1's own SQL parser (see below) |
-| Live pilot comparison | SKIP | `guimasuko/collector_template` is not reachable from this session; every access path re-tried 2026-09-14 and listed below |
+| Direct collector-template comparison | PASS | Compared `GUIDELINES.md`, `FORECAST_TARGET_GUIDELINES.md`, template tree and fleet skill/configuration structure at pinned template tree `8e4613b36c2808a7de234934a81bb26f7a22d367`; no blocker or minor drift |
 | Analytical-aggregate ownership | PASS | the ten exclusion CDIDs handed to `collector_ons_ex_cpi`, 41 aggregates retained, impact measured; see above |
 | Security review | PASS | see below |
 | Diff review | PASS | full diff reviewed; no secret, `.env`, debug print, generated workbook or binary committed |
@@ -671,105 +671,50 @@ therefore cannot leave the documentation quietly wrong.
 
 ## Remaining gates
 
-1. **Databricks execution.** Execute the DDL, MERGE, two-run and failure tests
-   in an approved Databricks workspace, and confirm the Unity Catalog path,
-   catalog/schema creation or the expected permission error, Delta table
-   behaviour, named-parameter binding, `MERGE` row semantics and idempotency.
-   **SKIP — no approved Databricks workspace/credentials.** Re-probed
-   2026-09-14: no `DBX_SERVER_HOSTNAME`/`DBX_HTTP_PATH`/`DATABRICKS_TOKEN`/
-   `AKV_VAULT_URL` in the environment, no `~/.databrickscfg`, and no reachable
-   workspace host. It is never marked PASS. Everything reachable statically has
-   been done instead: every emitted statement is parsed by Spark 4.1.1's own SQL
-   parser, and the portability gate rejects PostgreSQL-only syntax, unbound
-   literals, cross-schema references and any `MERGE` that leans on an unenforced
-   primary key. That narrows the open risk to runtime and catalog semantics, not
-   syntax.
+1. **Databricks execution — SKIP.** No approved workspace, host or credentials
+   are available in this environment. Spark SQL grammar, portability and negative
+   controls pass, but they do not substitute for real Unity Catalog execution.
+2. **Production `series_id` migration — SKIP.** The reviewed migration passed
+   rehearsal on a populated PostgreSQL 16.13 copy, but no authorised production
+   database is reachable here.
+3. **Pre-split database cleanup — OPTIONAL OPERATOR ACTION.** Databases populated
+   before the ownership split may retain ten frozen EX-CPI rows. The reviewed
+   inspect-first cleanup above is not a functional gate for fresh builds.
+4. **Legacy transformed-weight rebuild — CONDITIONAL OPERATOR ACTION.** Only
+   databases created by the retired storage model require archival/rebuild; the
+   current fresh-build contract is unaffected.
+5. **Pre-2025 segment history — SOURCE-SCOPE LIMITATION.** ONS did not publish
+   the same consumption-segment product before its stated boundary; this is not
+   treated as a failed collector gate.
 
-2. **Live pilot comparison against `guimasuko/collector_template`.**
-   **SKIP — the repository is not reachable from this session.** Every access
-   path was re-tried on 2026-09-14 and each failed:
-
-   | Path | Result |
-   | --- | --- |
-   | `add_repo` | `cross-tier adds are not supported in v1` — the session holds `lucasweber1202` repositories and cannot attach another owner's |
-   | GitHub API tool | `Access denied: repository ... is not configured for this session` |
-   | Workspace repository listing | ten repositories, all `lucasweber1202/*`; nothing matching `template` |
-   | `WebFetch https://github.com/guimasuko/collector_template` | HTTP 404 |
-   | anonymous `git clone` / `git ls-remote` | `could not read Username for 'https://github.com'` |
-   | `codeload.github.com` tarball | HTTP 403 |
-
-   The repository is private to another owner and cannot be attached here. The
-   root `GUIDELINES.md` and `FORECAST_TARGET_GUIDELINES.md` are equally
-   unavailable: they are not in the governance repository either.
-
-   The comparison was therefore executed in full against the authority that **is**
-   reachable — `MASTER_MACRO_COLLECTOR_GUIDELINES.md`, which the fleet declares
-   the consolidated contract overriding stale examples — and is tabulated under
-   "Structural and behavioural comparison" below. It found and fixed one
-   GUIDELINE DRIFT. `.github/` was re-diffed byte-for-byte against the governance
-   repository and every file under `.github/skills/` and `.github/prompts/` is
-   identical. This gate stays SKIP because the pilot's concrete files could still
-   differ from the guideline prose in ways the prose does not describe.
-
-3. **`series_id` migration against a production database.** The procedure is
-   executable rather than a sketch and was re-rehearsed end to end on a real
-   populated PostgreSQL 16.13 database matching the current shape (see
-   "Rehearsal executed 2026-09-14"). **SKIP — production migration not
-   executed**; no authorised, approved production database is reachable from
-   this environment, so this remains an operator action.
-
-4. **Legacy-weights rebuild against real pre-existing data.** A database written
-   by a version that stored official points per thousand in `weights` is
-   detected and refused, but the archival and full-history rebuild has not been
-   executed against real legacy data.
-
-5. **Exclusion-aggregate cleanup on an already-populated database.** The
-   collector no longer maintains the ten exclusion aggregates, but a database
-   populated before this change still holds them, frozen at their last vintage.
-   The reviewed deletion is documented above and is deliberately **not**
-   executed automatically.
-
-6. **Consumption-segment history before February 2025.** ONS published item
-   indices, a deeper and differently classified level, before the consumption
-   segment product began. They are deliberately not stitched into the segment
-   series. Extending coverage backwards is a separate, scoped decision.
-
-7. **`collector_ons_ex_cpi` currency code.** That collector emits `GBR` where the
-   fleet vocabulary is the ISO 4217 code `GBP`. The guideline and the intake
-   backlog were corrected in the governance repository; the constant in that
-   collector and any populated `metadata.country` still have to be changed in
-   its own repository.
-
-Because gates 1 and 3 are open, this collector must **not** be described as
-"100% production-certified". It is verified end to end on PostgreSQL against the
-live source; Databricks execution and the production identifier migration remain
-outstanding.
+The direct template comparison now passes. Because Databricks execution and the
+production identifier migration remain unexecuted, this collector stays
+`verification` and must not be described as ready or 100% certified.
 
 ### Structural and behavioural comparison
 
-`guimasuko/collector_template` is **not reachable from this session**, so the
-comparison below is against the reachable authority: the fleet's consolidated
-contract `MASTER_MACRO_COLLECTOR_GUIDELINES.md`, which the governance repository
-declares authoritative over stale examples in any individual file. The root
-`GUIDELINES.md` and `FORECAST_TARGET_GUIDELINES.md` that the master guideline
-cross-references do not exist in the governance repository either, so those two
-authorities are likewise unavailable and their content is only reachable through
-the master guideline that consolidates them.
-
-Executed 2026-09-14 against sections 4–11 and the section 19 checklist.
+Executed 2026-09-14 directly against
+[`guimasuko/collector_template`](https://github.com/guimasuko/collector_template)
+at tree `8e4613b36c2808a7de234934a81bb26f7a22d367`, including root
+`GUIDELINES.md` (blob `1bf3df07a9b81932d26571def6bf0e531b8c1464`),
+`FORECAST_TARGET_GUIDELINES.md` (blob
+`7ac0663c7825443e1009a18481c0b73b0184b1cd`), the repository layout and
+the fleet skills/configuration structure. Source-specific differences were
+judged by behaviour and contract, not visual identity. No blocker or minor drift
+was found.
 
 | Area | Template / guideline | CPI today | Classification | Action |
 | --- | --- | --- | --- | --- |
 | Repository name / schema | `collector_<source>_<dataset>`, `SCHEMA_NAME` identical | `collector_ons_cpi` both | MATCH | none |
 | Root layout | `main.py` at root, flat `scripts/`, no `core/`/`lib/`/`utils/`/`common/` | matches exactly | MATCH | none |
-| Extra module | `extract.py` under ~400 lines, split only if the source forces it and it is documented | `scripts/segments.py` is a second flat module | ACCEPTABLE LOCAL EXTENSION | none — a second ONS dataset with its own statistical status, index reference and two published layouts; documented above |
+| Extra module | `extract.py` under ~400 lines, split only if the source forces it and it is documented | `scripts/segments.py` is a second flat module | APPROVED / NECESSARY SOURCE-SPECIFIC EXTENSION | none — a second ONS dataset with its own statistical status, index reference and two published layouts; documented above |
 | `.github/`, `.vscode/`, `.gitignore` | copied verbatim from the pilot | re-diffed byte-for-byte against the governance repository; `.github/skills/` and `.github/prompts/` identical | MATCH | none |
 | `metadata` DDL | 13 columns, PK `series_id` | identical, column for column | MATCH | none |
 | `time_series` DDL | 5 columns, PK `(series_id, reference_date, vintage_date)` | identical | MATCH | none |
 | `logs` DDL | identity `id`, bounded text, `status` success/error | identical | MATCH | none |
 | `weights` DDL | approved forecast-target table | identical | MATCH | none |
-| `original_weights` DDL | PK `series_id` | PK `(series_id, reference_date, vintage_date)`, plus `weight_base_year` | REQUIRED UK EXCEPTION | none — a series-only key cannot hold two ONS regimes or a revision; §11.2 itself forbids improvising that away and requires approval, which is recorded |
-| 64-bit float spelling | "common subset of both dialects" | `DOUBLE PRECISION` on PostgreSQL, `DOUBLE` on Databricks | REQUIRED UK EXCEPTION | none — the dialects share no spelling and `FLOAT` would silently halve precision on Databricks |
+| `original_weights` DDL | PK `series_id` | PK `(series_id, reference_date, vintage_date)`, plus `weight_base_year` | APPROVED / NECESSARY SOURCE-SPECIFIC EXTENSION | none — a series-only key cannot hold two ONS regimes or a revision; §11.2 itself forbids improvising that away and requires approval, which is recorded |
+| 64-bit float spelling | "common subset of both dialects" | `DOUBLE PRECISION` on PostgreSQL, `DOUBLE` on Databricks | APPROVED / NECESSARY SOURCE-SPECIFIC EXTENSION | none — the dialects share no spelling and `FLOAT` would silently halve precision on Databricks |
 | Standardized columns | no unauthorized additions | none added | MATCH | none |
 | Vintage semantics | first sight → today; identical → no-op; changed later → new row; changed same day → update today's row only; 10-decimal compare; drop non-finite | implemented exactly, verified on PostgreSQL | MATCH | none |
 | Latest-value query | canonical `ROW_NUMBER()` form | identical, shipped in this file | MATCH | none |
@@ -797,7 +742,7 @@ Executed 2026-09-14 against sections 4–11 and the section 19 checklist.
 | Verification loop | Phase 8 checklist | every applicable box executed; two gates remain SKIP with reasons | MATCH | none |
 
 One GUIDELINE DRIFT was found and fixed. No BLOCKER and no DEAD/LEGACY code
-remains. No REQUIRED UK EXCEPTION was removed.
+remains. No APPROVED / NECESSARY SOURCE-SPECIFIC EXTENSION was removed.
 
 **What this comparison cannot establish:** whether the template's *concrete
 files* differ from the guideline text in ways the guideline does not describe —
