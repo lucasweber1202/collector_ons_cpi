@@ -72,7 +72,10 @@ def test_missing_markers_never_become_labels() -> None:
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        (datetime(2026, 7, 14), date(2026, 7, 1)),
+        # openpyxl hands back a naive datetime for an Excel date cell, because an
+        # Excel serial date carries no zone. Attaching one here would test a value
+        # the source can never produce.
+        (datetime(2026, 7, 14), date(2026, 7, 1)),  # noqa: DTZ001
         (date(2026, 7, 14), date(2026, 7, 1)),
         ("2026-07-14", date(2026, 7, 1)),
         (pd.Timestamp("2026-07-14"), date(2026, 7, 1)),

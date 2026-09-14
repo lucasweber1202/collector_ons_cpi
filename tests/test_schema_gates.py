@@ -75,7 +75,12 @@ def test_weights_sheet_must_keep_the_published_total(
     assert extract.get_original_weights()[date(2026, 6, 1)]["CPI_W1_0"] == 1000.0
 
 
-SEGMENT_HEADER = "INDEX_DATE,COICOP4_ID,COICOP5_ID,RPI_SECTION,CS_ID,CS_DESC,RPI_INDEX,CPI_INDEX,CPI_WEIGHT,RPI_WEIGHT,CPIH_WEIGHT"  # noqa: E501
+# One published header line; ONS writes it on a single row and a wrapped copy
+# would no longer be the literal the gate is checking.
+SEGMENT_HEADER = (
+    "INDEX_DATE,COICOP4_ID,COICOP5_ID,RPI_SECTION,CS_ID,CS_DESC,"
+    "RPI_INDEX,CPI_INDEX,CPI_WEIGHT,RPI_WEIGHT,CPIH_WEIGHT"
+)
 
 
 def _segment_csv(rows: int = 400, *, stamp: str = "202607", weight: float = 2.5) -> bytes:
