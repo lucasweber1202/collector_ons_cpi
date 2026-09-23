@@ -78,8 +78,16 @@ def test_source_replay_twice_and_logged_failure(
         }
         for series_id in panel.catalog
     }
-    assert set(stored_by_series) == set(source)
-    for series_id, published in source.items():
+    # GUIDELINES §5.1 deliberately drops stale unprotected segment series.
+    # The live source can add retired rows without making this a storage gap.
+    assert set(stored_by_series) <= set(source)
+    omitted = set(source) - set(stored_by_series)
+    latest = max(observations)
+    for series_id in omitted:
+        last = max(source[series_id])
+        assert (latest.year - last.year) * 12 + latest.month - last.month > 6
+    for series_id in stored_by_series:
+        published = source[series_id]
         stored = stored_by_series[series_id]
         assert len(stored) == len(published)
         months = sorted(published)
