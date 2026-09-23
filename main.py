@@ -43,6 +43,7 @@ from scripts.original_weights import upsert_original_weights
 from scripts.run_logs import insert_run_log
 from scripts.segments import SEGMENT_FIRST_MONTH, SegmentPanel, chain_year, collect_segments
 from scripts.time_series import get_max_reference_date, upsert_time_series
+from scripts.usable_series import apply_usable_series_filter
 from scripts.validate import (
     build_hierarchy,
     derive_operational_weights,
@@ -387,6 +388,22 @@ def _collect(args: argparse.Namespace, engine: Engine) -> int:
 
     original_weights = _original_weight_rows(get_original_weights(), segments.official_weights)
 
+    # GUIDELINES 5.1, applied after validation and before the transaction: the
+    # reconciliation above therefore scores the complete published basket, so
+    # the filter cannot mask a failure by removing the series that caused it.
+    # Every persisted layer is pruned with one key set, so a dropped series
+    # leaves no metadata without observations and no weight without a series.
+    catalog = get_series_catalog()
+    observations, operational, original_weights, catalog, _usability = apply_usable_series_filter(
+        observations,
+        operational,
+        original_weights,
+        catalog,
+        latest_period=max(observations),
+    )
+    if not observations:
+        raise ValueError("Usable-series filter removed every series; refusing to persist")
+
     collected_at = datetime.now(UTC)
     if engine.dialect.name not in TRANSACTIONAL_DIALECTS:
         logger.warning(
@@ -403,7 +420,7 @@ def _collect(args: argparse.Namespace, engine: Engine) -> int:
         )
         new_weights, weight_vintages = upsert_weights(conn, operational, collected_at)
         metadata_inserted, metadata_updated = upsert_metadata(
-            conn, observations, collected_at, get_series_catalog()
+            conn, observations, collected_at, catalog
         )
     logger.info(
         "Run result: observations=%d vintages=%d weights=%d weight_vintages=%d "

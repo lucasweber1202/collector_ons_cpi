@@ -59,6 +59,28 @@ LOG_LEVEL = os.getenv("COLLECTOR_LOG_LEVEL", "INFO")
 POLL_INTERVAL = float(os.getenv("COLLECTOR_POLL_INTERVAL", "30"))
 MAX_WAIT = float(os.getenv("COLLECTOR_MAX_WAIT", "900"))
 VALIDATION_TOLERANCE_PP = float(os.getenv("COLLECTOR_VALIDATION_TOLERANCE_PP", "0.10"))
+
+# GUIDELINES 5.1 usable-series filtering, applied to a forecast target.
+#
+# A naive minimum-history rule would be catastrophic here and is deliberately
+# absent. Measured against the live basket, 681 of 860 series start partway
+# through the collected window -- the consumption-segment layer only begins in
+# February 2025, and COICOP classes are routinely born by rebasing and
+# reclassification. Any MIN_HISTORY_YEARS worth having would delete most of the
+# basket, and the basket is the target.
+#
+# Staleness is the signal that actually separates live from dead. Measured on
+# the same basket: 844 series print in the latest month, and exactly 16 stop
+# 6.9 months earlier -- retired consumption segments ONS dropped from later
+# editions. Six months sits in the middle of that gap with margin on both
+# sides, and a monthly index that has missed six consecutive prints is retired
+# in fact.
+#
+# The conjunction in scripts/usable_series.py is the real safety property: a
+# series carrying a weight in the current regime is never dropped, however
+# stale, because dropping a weighted series would break the reconstruction the
+# target exists to support.
+MAX_STALE_MONTHS = int(os.getenv("COLLECTOR_MAX_STALE_MONTHS", "6"))
 # Share of reconcilable checks that must actually run on every invocation.
 # Measured coverage on the current published workbook is 1.0000 for both checks,
 # so this floor only trips on a real regression such as a renamed Table 38 column
