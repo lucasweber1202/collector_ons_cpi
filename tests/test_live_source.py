@@ -86,9 +86,8 @@ def test_source_replay_twice_and_logged_failure(
     for series_id in omitted:
         last = max(source[series_id])
         assert (latest.year - last.year) * 12 + latest.month - last.month > 6
-    for series_id in stored_by_series:
+    for series_id, stored in stored_by_series.items():
         published = source[series_id]
-        stored = stored_by_series[series_id]
         assert len(stored) == len(published)
         months = sorted(published)
         for month in (months[0], months[len(months) // 2], months[-1]):
