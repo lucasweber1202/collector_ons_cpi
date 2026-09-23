@@ -54,3 +54,8 @@ target-version = "py311"
 # repository (.github/) or prose whose snippets are quoted source, so neither may
 # be rewritten to suit a formatter. Ruff owns this repository's Python only.
 extend-exclude = ["*.md"]
+
+[tool.ruff.lint.per-file-ignores]
+# This file is copied verbatim from GUIDELINES.md §8.9; its guarded
+# runtime probing intentionally catches exceptions without logging.
+"scripts/databricks_engine.py" = ["BLE001", "S110"]
