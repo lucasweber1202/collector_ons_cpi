@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from scripts.config import MAX_STALE_MONTHS
+from scripts.config import MAX_STALE_MONTHS, MIN_HISTORY_YEARS
 
 logger = logging.getLogger(__name__)
 
@@ -52,20 +52,27 @@ class UsabilityReport:
     kept: tuple[str, ...]
     stale: tuple[str, ...]
     empty: tuple[str, ...]
+    short_history: tuple[str, ...]
     protected_by_weight: tuple[str, ...]
 
     @property
     def dropped(self) -> tuple[str, ...]:
-        return tuple(sorted(set(self.stale) | set(self.empty)))
+        return tuple(sorted(set(self.stale) | set(self.empty) | set(self.short_history)))
 
 
 def _month_distance(later: date, earlier: date) -> int:
     return (later.year - earlier.year) * 12 + (later.month - earlier.month)
 
 
-def _last_non_null(observations: Observations, series_id: str) -> date | None:
-    months = [month for month, values in observations.items() if values.get(series_id) is not None]
-    return max(months) if months else None
+def _non_null_months(observations: Observations, series_id: str) -> list[date]:
+    return [month for month, values in observations.items() if values.get(series_id) is not None]
+
+
+def _span_years(months: list[date]) -> float:
+    """Calendar span of the non-null prints, in years. One print spans nothing."""
+    if len(months) < 2:
+        return 0.0
+    return (max(months) - min(months)).days / 365.25
 
 
 def _weighted_in_current_regime(weights: Weights, series_id: str) -> bool:
@@ -81,18 +88,34 @@ def classify_series(
     *,
     latest_period: date,
     max_stale_months: int = MAX_STALE_MONTHS,
+    min_history_years: float = MIN_HISTORY_YEARS,
 ) -> UsabilityReport:
-    """Decide, per series_id, whether 5.1 admits it to persistence."""
+    """Decide, per series_id, whether 5.1 admits it to persistence.
+
+    5.1 names two failures, and both are applied here:
+
+      obsolete            last non-null print older than max_stale_months
+      insufficient history non-null span shorter than min_history_years
+
+    The second never fires alone. A series is only short-history-dropped when
+    it is *also* unweighted and *also* no longer printing in the current
+    period. A legitimately new official component satisfies the span test but
+    fails both of the others -- it prints now, and the basket weights it -- so
+    the rule cannot reach it. What it does reach is a stub: a handful of prints
+    that stopped, still too recent to be caught by staleness.
+    """
     series_ids = {series_id for values in observations.values() for series_id in values}
     kept: list[str] = []
     stale: list[str] = []
     empty: list[str] = []
+    short: list[str] = []
     protected: list[str] = []
     for series_id in sorted(series_ids):
-        last_seen = _last_non_null(observations, series_id)
+        months = _non_null_months(observations, series_id)
+        last_seen = max(months) if months else None
         weighted = _weighted_in_current_regime(weights, series_id)
         if weighted:
-            # Load-bearing for reconstruction: kept regardless of staleness.
+            # Load-bearing for reconstruction: kept regardless of 5.1.
             kept.append(series_id)
             if last_seen is None or _month_distance(latest_period, last_seen) > max_stale_months:
                 protected.append(series_id)
@@ -103,11 +126,17 @@ def classify_series(
         if _month_distance(latest_period, last_seen) > max_stale_months:
             stale.append(series_id)
             continue
+        if last_seen != latest_period and _span_years(months) < min_history_years:
+            # Short, unweighted, and no longer printing: a stub, not a new
+            # component. A new component would still be printing this period.
+            short.append(series_id)
+            continue
         kept.append(series_id)
     return UsabilityReport(
         kept=tuple(kept),
         stale=tuple(stale),
         empty=tuple(empty),
+        short_history=tuple(short),
         protected_by_weight=tuple(protected),
     )
 
@@ -157,6 +186,7 @@ def apply_usable_series_filter(
     *,
     latest_period: date,
     max_stale_months: int = MAX_STALE_MONTHS,
+    min_history_years: float = MIN_HISTORY_YEARS,
 ) -> tuple[Observations, Weights, list[dict[str, Any]], dict[str, dict[str, str]], UsabilityReport]:
     """Prune unusable series from everything that is about to be written.
 
@@ -164,17 +194,24 @@ def apply_usable_series_filter(
     cannot leave metadata without observations, or a weight without a series.
     """
     report = classify_series(
-        observations, operational, latest_period=latest_period, max_stale_months=max_stale_months
+        observations,
+        operational,
+        latest_period=latest_period,
+        max_stale_months=max_stale_months,
+        min_history_years=min_history_years,
     )
     drop = set(report.dropped)
     logger.info(
-        "Usable-series filter: kept %d, dropped %d (stale=%d empty=%d; "
-        "max_stale_months=%d, latest_period=%s)",
+        "Usable-series filter: kept %d, dropped %d (stale=%d empty=%d "
+        "short_history=%d; max_stale_months=%d, min_history_years=%s, "
+        "latest_period=%s)",
         len(report.kept),
         len(report.dropped),
         len(report.stale),
         len(report.empty),
+        len(report.short_history),
         max_stale_months,
+        min_history_years,
         latest_period,
     )
     if report.protected_by_weight:

@@ -62,12 +62,14 @@ VALIDATION_TOLERANCE_PP = float(os.getenv("COLLECTOR_VALIDATION_TOLERANCE_PP", "
 
 # GUIDELINES 5.1 usable-series filtering, applied to a forecast target.
 #
-# A naive minimum-history rule would be catastrophic here and is deliberately
-# absent. Measured against the live basket, 681 of 860 series start partway
-# through the collected window -- the consumption-segment layer only begins in
-# February 2025, and COICOP classes are routinely born by rebasing and
-# reclassification. Any MIN_HISTORY_YEARS worth having would delete most of the
-# basket, and the basket is the target.
+# 5.1 asks for two things: obsolete series and insufficient history. Both are
+# implemented, but a *naive* minimum-history rule would be catastrophic here.
+# Measured against the live basket, 681 of 860 series start partway through the
+# collected window -- the consumption-segment layer only begins in February
+# 2025, and COICOP classes are routinely born by rebasing and reclassification.
+# A bare span threshold of any useful size would delete most of the basket, and
+# the basket is the target. MIN_HISTORY_YEARS below therefore never fires
+# alone; see the conjunction in scripts/usable_series.py.
 #
 # Staleness is the signal that actually separates live from dead. Measured on
 # the same basket: 844 series print in the latest month, and exactly 16 stop
@@ -81,6 +83,26 @@ VALIDATION_TOLERANCE_PP = float(os.getenv("COLLECTOR_VALIDATION_TOLERANCE_PP", "
 # stale, because dropping a weighted series would break the reconstruction the
 # target exists to support.
 MAX_STALE_MONTHS = int(os.getenv("COLLECTOR_MAX_STALE_MONTHS", "6"))
+
+# The second half of 5.1: insufficient history.
+#
+# This cannot be a bare span threshold. Measured on the live basket, the
+# shortest surviving series carries 7 observations over 0.50 years -- and it is
+# both weighted and printing in the current month, i.e. a legitimately new
+# official component. A bare MIN_HISTORY_YEARS of any useful size would delete
+# it, and deleting a weighted component breaks the reconstruction.
+#
+# One year is the threshold because the basket is monthly and a component with
+# under twelve prints cannot support a year-on-year rate, which is what the
+# target is for. It only fires in conjunction (see scripts/usable_series.py):
+# short AND unweighted AND no longer printing. A newly introduced component
+# satisfies the first but never the last two.
+#
+# On the current release this drops nothing, because every observed series is
+# weighted -- on this source the observation set is a subset of the weighted
+# set. That is the measured outcome, not a disabled rule: the conjunction still
+# fires on a genuine stub, which tests/test_usable_series.py demonstrates.
+MIN_HISTORY_YEARS = float(os.getenv("COLLECTOR_MIN_HISTORY_YEARS", "1.0"))
 # Share of reconcilable checks that must actually run on every invocation.
 # Measured coverage on the current published workbook is 1.0000 for both checks,
 # so this floor only trips on a real regression such as a renamed Table 38 column

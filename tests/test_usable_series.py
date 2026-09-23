@@ -13,6 +13,7 @@ from datetime import date
 
 import pytest
 
+from scripts.config import MIN_HISTORY_YEARS
 from scripts.usable_series import (
     UsabilityReport,
     apply_usable_series_filter,
@@ -84,7 +85,15 @@ def test_an_irregular_series_with_gaps_is_kept_if_it_still_prints() -> None:
 
 
 def test_recent_nulls_do_not_kill_a_series_whose_last_real_print_is_recent() -> None:
-    spec = {"TRAILNULL": [(date(2026, 6, 1), 100.0), (date(2026, 7, 1), None), (LATEST, None)]}
+    """Trailing nulls must not read as death when the last real print is recent.
+
+    The fixture carries two years of real prints before the nulls so that only
+    staleness is under test: a one-print fixture would be a stub, and would be
+    dropped by the history rule for reasons that have nothing to do with the
+    behaviour this test names.
+    """
+    history: list[tuple[date, float | None]] = [(m, 100.0) for m in _months(date(2024, 7, 1), 24)]
+    spec = {"TRAILNULL": [*history, (date(2026, 7, 1), None), (LATEST, None)]}
     report = classify_series(_series(spec), {}, latest_period=LATEST)
     assert report.kept == ("TRAILNULL",)
 
@@ -151,7 +160,12 @@ def test_a_weight_in_an_old_regime_does_not_protect_a_dead_series() -> None:
     ],
 )
 def test_the_staleness_boundary_is_inclusive(last_print: date, expected_kept: bool) -> None:
-    spec = {"EDGE": [(last_print, 100.0)]}
+    """Ample history so the boundary under test is staleness and nothing else."""
+    # 25 months inclusive, so the run actually ENDS on last_print: a 24-month
+    # run from two years earlier stops one month short and would be testing a
+    # different staleness than the one parametrised.
+    span_start = date(last_print.year - 2, last_print.month, 1)
+    spec = {"EDGE": [(m, 100.0) for m in _months(span_start, 25)]}
     report = classify_series(_series(spec), {}, latest_period=LATEST, max_stale_months=6)
     assert (report.kept == ("EDGE",)) is expected_kept
 
@@ -201,6 +215,89 @@ def test_no_metadata_survives_without_observations_and_no_weight_without_a_serie
     assert {sid for values in weights.values() for sid in values} <= surviving
 
 
-def test_report_dropped_is_the_union_of_stale_and_empty() -> None:
-    report = UsabilityReport(kept=("A",), stale=("B",), empty=("C",), protected_by_weight=())
-    assert report.dropped == ("B", "C")
+def test_report_dropped_is_the_union_of_every_drop_reason() -> None:
+    report = UsabilityReport(
+        kept=("A",), stale=("B",), empty=("C",), short_history=("D",), protected_by_weight=()
+    )
+    assert report.dropped == ("B", "C", "D")
+
+
+# -- 5.1's second half: insufficient history -------------------------------
+
+
+def test_the_minimum_history_threshold_is_a_real_number() -> None:
+    """A symbolic zero would satisfy the letter of 5.1 and none of its point."""
+    assert MIN_HISTORY_YEARS > 0
+
+
+def test_a_short_stub_that_stopped_is_dropped_for_insufficient_history() -> None:
+    """The case staleness cannot reach: too few prints, stopped too recently.
+
+    Three prints ending three months ago. Not stale (under six months), not
+    empty, not weighted -- so without the history rule it would persist.
+    """
+    stub = {"STUB": [(m, 100.0) for m in _months(date(2026, 3, 1), 3)]}
+    report = classify_series(_series(stub), {}, latest_period=LATEST)
+    assert report.short_history == ("STUB",)
+    assert report.stale == ()
+    assert report.kept == ()
+
+
+def test_a_newly_introduced_component_is_not_mistaken_for_a_stub() -> None:
+    """Same short span as the stub above, but still printing. Must survive.
+
+    This is the 681-series case and the reason the rule is a conjunction: a new
+    official component has a short span too, and the only thing separating it
+    from a stub is that it is still being published.
+    """
+    fresh = {"NEW": [(m, 100.0) for m in _months(date(2026, 6, 1), 3)]}
+    assert fresh["NEW"][-1][0] == LATEST
+    report = classify_series(_series(fresh), {}, latest_period=LATEST)
+    assert report.kept == ("NEW",)
+    assert report.short_history == ()
+
+
+def test_a_short_weighted_series_is_never_dropped_for_history() -> None:
+    """Weight protection outranks the history rule, as it does staleness.
+
+    The live basket's shortest survivor is 7 prints over 0.50 years and is
+    weighted; deleting it would break the reconstruction.
+    """
+    short = {"SHORTW": [(m, 100.0) for m in _months(date(2026, 2, 1), 3)]}
+    report = classify_series(_series(short), {LATEST: {"SHORTW": 0.5}}, latest_period=LATEST)
+    assert report.kept == ("SHORTW",)
+    assert report.short_history == ()
+
+
+def test_a_long_history_series_that_stopped_recently_is_kept_not_short() -> None:
+    """Stopped but long: the history rule must not claim it.
+
+    Four months stale is inside the staleness window, and the span is ample, so
+    nothing should fire.
+    """
+    long_stopped = {"LONG": [(m, 100.0) for m in _months(date(2024, 1, 1), 29)]}
+    report = classify_series(_series(long_stopped), {}, latest_period=LATEST)
+    assert report.kept == ("LONG",)
+    assert report.short_history == ()
+
+
+def test_the_history_rule_requires_all_three_conditions() -> None:
+    """Drop only when short AND unweighted AND no longer printing."""
+    short_stopped = [(m, 100.0) for m in _months(date(2026, 3, 1), 3)]
+    # short + unweighted + stopped -> dropped
+    assert classify_series(
+        _series({"S": short_stopped}), {}, latest_period=LATEST
+    ).short_history == ("S",)
+    # short + weighted + stopped -> kept
+    assert (
+        classify_series(
+            _series({"S": short_stopped}), {LATEST: {"S": 1.0}}, latest_period=LATEST
+        ).short_history
+        == ()
+    )
+    # short + unweighted + printing -> kept
+    still_printing = [*short_stopped, (LATEST, 100.0)]
+    assert (
+        classify_series(_series({"S": still_printing}), {}, latest_period=LATEST).short_history
+        == ()
+    )
