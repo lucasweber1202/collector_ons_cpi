@@ -25,10 +25,11 @@ import pytest
 
 from tests.conftest import emitted_sql
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("DATABRICKS_SQL_PARSE_TEST") != "1",
-    reason="explicit opt-in: starting a local Spark session takes about half a minute",
-)
+# This used to be opt-in behind DATABRICKS_SQL_PARSE_TEST, on the grounds that
+# starting a local Spark session takes about half a minute. Measured, it takes
+# about eight seconds, and a check that never runs is not a check: it is the
+# only evidence this repository has that its SQL is valid Databricks SQL. The
+# session is skipped only where no JVM is available, which the fixture reports.
 
 
 @pytest.fixture(scope="module")
