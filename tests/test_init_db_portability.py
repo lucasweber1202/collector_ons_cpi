@@ -64,7 +64,7 @@ def test_float_is_never_emitted(template: str) -> None:
 
 def test_the_inventory_covers_every_table_and_operation() -> None:
     """A statement added to the collector must appear here, or it is unreviewed."""
-    assert len(STATEMENTS) >= 31
+    assert len(STATEMENTS) >= 38
     for table in ("time_series", "weights", "original_weights", "metadata"):
         for operation in ("insert", "merge", "update"):
             assert f"{table}.{operation}" in STATEMENTS
@@ -74,6 +74,7 @@ def test_the_inventory_covers_every_table_and_operation() -> None:
         "ddl.time_series",
         "ddl.weights",
         "ddl.original_weights",
+        "ddl.original_weights_catalog",
         "ddl.logs",
     }
 

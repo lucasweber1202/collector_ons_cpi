@@ -5,7 +5,14 @@ from __future__ import annotations
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from scripts.config import LOGS_TABLE, METADATA_TABLE, SCHEMA_NAME, TIME_SERIES_TABLE, WEIGHTS_TABLE
+from scripts.config import (
+    LOGS_TABLE,
+    METADATA_TABLE,
+    ORIGINAL_WEIGHTS_CATALOG_TABLE,
+    SCHEMA_NAME,
+    TIME_SERIES_TABLE,
+    WEIGHTS_TABLE,
+)
 from scripts.db import build_engine
 
 # PostgreSQL and Databricks SQL share no spelling for a 64-bit float. Spark's
@@ -83,6 +90,27 @@ CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.original_weights (
 """
 
 
+# The W1 workbook publishes weights for classification levels that Table 38
+# does not index, so `original_weights` legitimately holds source-native,
+# weight-only identities. Without this table nothing in the database says what
+# `CPI_W1_01P1P1P1` is or which index series it belongs to, and those rows read
+# as orphans. `mapped_series_id` is the crosswalk: the Table 38 series this
+# weight attaches to, or NULL when the source publishes no index at that level.
+CREATE_ORIGINAL_WEIGHTS_CATALOG_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.{ORIGINAL_WEIGHTS_CATALOG_TABLE} (
+    series_id VARCHAR(200) NOT NULL,
+    classification_code VARCHAR(50) NOT NULL,
+    name VARCHAR(500) NOT NULL,
+    native_id VARCHAR(50),
+    mapped_series_id VARCHAR(200),
+    dataset VARCHAR(500) NOT NULL,
+    source_url VARCHAR(1000) NOT NULL,
+    collected_at TIMESTAMP NOT NULL,
+    CONSTRAINT pk_original_weights_catalog PRIMARY KEY (series_id)
+)
+"""
+
+
 def double_type(dialect: str) -> str:
     """Return the 64-bit float spelling this SQL dialect accepts."""
     return DOUBLE_TYPES.get(dialect, DEFAULT_DOUBLE_TYPE)
@@ -98,6 +126,7 @@ def init_db(engine: Engine) -> None:
             CREATE_TIME_SERIES_TABLE.format(double=double),
             CREATE_WEIGHTS_TABLE.format(double=double),
             CREATE_ORIGINAL_WEIGHTS_TABLE.format(double=double),
+            CREATE_ORIGINAL_WEIGHTS_CATALOG_TABLE,
             CREATE_LOGS_TABLE,
         ):
             conn.execute(text(statement))

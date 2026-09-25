@@ -9,6 +9,7 @@ routing around it would have been silent.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 
 import pytest
@@ -120,12 +121,12 @@ def test_a_release_timeout_is_a_successful_run_that_writes_nothing(
     from sqlalchemy import text
 
     with engine.connect() as conn:
-        statuses = (
+        statuses: Sequence[str] = (
             conn.execute(text("SELECT status FROM collector_ons_cpi.logs ORDER BY id"))
             .scalars()
             .all()
         )
-        observations = conn.execute(
+        observations: int = conn.execute(
             text("SELECT COUNT(*) FROM collector_ons_cpi.time_series")
         ).scalar_one()
     assert statuses == ["success", "success"]

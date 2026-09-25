@@ -39,7 +39,11 @@ from scripts.extract import (
 )
 from scripts.init_db import init_db
 from scripts.metadata import assert_current_series_ids, upsert_metadata
-from scripts.original_weights import upsert_original_weights
+from scripts.original_weights import (
+    assert_weight_identity_contract,
+    upsert_original_weight_catalog,
+    upsert_original_weights,
+)
 from scripts.run_logs import insert_run_log
 from scripts.segments import SEGMENT_FIRST_MONTH, SegmentPanel, chain_year, collect_segments
 from scripts.time_series import get_max_reference_date, upsert_time_series
@@ -422,10 +426,18 @@ def _collect(args: argparse.Namespace, engine: Engine) -> int:
         metadata_inserted, metadata_updated = upsert_metadata(
             conn, observations, collected_at, catalog
         )
+        # The crosswalk is written after metadata so the contract below can see
+        # the series this run actually stored, and asserted inside the same
+        # transaction so a broken weight identity rolls the run back.
+        catalog_inserted, catalog_updated = upsert_original_weight_catalog(
+            conn, get_original_weight_catalog(), collected_at
+        )
+        assert_weight_identity_contract(conn)
     logger.info(
         "Run result: observations=%d vintages=%d weights=%d weight_vintages=%d "
         "original_weights=%d original_weight_vintages=%d "
-        "metadata_inserted=%d metadata_updated=%d",
+        "metadata_inserted=%d metadata_updated=%d "
+        "weight_catalog_inserted=%d weight_catalog_updated=%d",
         new_obs,
         new_vintages,
         new_weights,
@@ -434,6 +446,8 @@ def _collect(args: argparse.Namespace, engine: Engine) -> int:
         original_vintages,
         metadata_inserted,
         metadata_updated,
+        catalog_inserted,
+        catalog_updated,
     )
     if args.export_validation:
         output = export_validation_xlsx(
