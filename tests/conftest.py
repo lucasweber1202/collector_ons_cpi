@@ -43,6 +43,7 @@ def build_engine(tmp_path: Path) -> Engine:
             init_db.CREATE_TIME_SERIES_TABLE.format(double="DOUBLE"),
             init_db.CREATE_WEIGHTS_TABLE.format(double="DOUBLE"),
             init_db.CREATE_ORIGINAL_WEIGHTS_TABLE.format(double="DOUBLE"),
+            init_db.CREATE_ORIGINAL_WEIGHTS_CATALOG_TABLE,
             logs,
         ):
             conn.execute(text(statement))
@@ -220,6 +221,7 @@ def emitted_sql() -> dict[str, str]:
         "ddl.time_series": init_db.CREATE_TIME_SERIES_TABLE.format(double=double),
         "ddl.weights": init_db.CREATE_WEIGHTS_TABLE.format(double=double),
         "ddl.original_weights": init_db.CREATE_ORIGINAL_WEIGHTS_TABLE.format(double=double),
+        "ddl.original_weights_catalog": init_db.CREATE_ORIGINAL_WEIGHTS_CATALOG_TABLE,
         "ddl.logs": init_db.CREATE_LOGS_TABLE,
         "time_series.max_reference": str(time_series._MAX_REFERENCE_SQL),
         "time_series.aggregates": str(time_series._AGGREGATES_SQL),
@@ -230,6 +232,12 @@ def emitted_sql() -> dict[str, str]:
         "metadata.select": str(metadata._SELECT_SQL),
         "metadata.legacy_guard": str(metadata.legacy_identifier_sql(f"{SCHEMA}.{METADATA_TABLE}")),
         "logs.insert": str(run_logs._INSERT_SQL),
+        "original_weights_catalog.select": str(original_weights._CATALOG_SELECT_SQL),
+        "original_weights_catalog.insert": str(original_weights._CATALOG_INSERT_SQL),
+        "original_weights_catalog.update": str(original_weights._CATALOG_UPDATE_SQL),
+        "original_weights_catalog.undocumented": str(original_weights._UNDOCUMENTED_SQL),
+        "original_weights_catalog.dangling": str(original_weights._DANGLING_MAPPING_SQL),
+        "original_weights_catalog.colliding": str(original_weights._COLLIDING_MAPPING_SQL),
     }
     for module, label in (
         (time_series, "time_series"),

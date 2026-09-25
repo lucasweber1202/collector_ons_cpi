@@ -10,10 +10,17 @@ from typing import Any
 from sqlalchemy import TextClause, text
 from sqlalchemy.engine import Connection
 
-from scripts.config import ORIGINAL_WEIGHTS_TABLE, SCHEMA_NAME
+from scripts.config import (
+    METADATA_TABLE,
+    ORIGINAL_WEIGHTS_CATALOG_TABLE,
+    ORIGINAL_WEIGHTS_TABLE,
+    SCHEMA_NAME,
+)
 
 logger = logging.getLogger(__name__)
 _TABLE = f"{SCHEMA_NAME}.{ORIGINAL_WEIGHTS_TABLE}"
+_CATALOG_TABLE = f"{SCHEMA_NAME}.{ORIGINAL_WEIGHTS_CATALOG_TABLE}"
+_METADATA_TABLE = f"{SCHEMA_NAME}.{METADATA_TABLE}"
 BATCH_SIZE = 500
 ROUND_DECIMALS = 10
 
@@ -183,3 +190,170 @@ def upsert_original_weights(
         len(updates),
     )
     return new_rows, new_vintages
+
+
+# -- the weight-only identity crosswalk ------------------------------------
+#
+# Table 38 indexes COICOP down to class level. The W1 workbook publishes
+# weights below that, and for two analytical totals the index set does not
+# carry, so `original_weights` holds more distinct series_ids than `metadata`
+# does. That is the source's shape, not a defect: a published weight is part of
+# the official record and is stored unmodified under the identity the workbook
+# gives it.
+#
+# What must not happen is that those identities stay unexplained. This table
+# names every one of them -- its classification code, its published label, its
+# CDID where the source gives one, and the Table 38 series it maps to, or NULL
+# when the source publishes no index at that level. An auditor can then join
+# `original_weights` to it and account for every row, instead of finding
+# several hundred identifiers with nothing to join to.
+
+_CATALOG_COLUMNS = (
+    "series_id",
+    "classification_code",
+    "name",
+    "native_id",
+    "mapped_series_id",
+    "dataset",
+    "source_url",
+    "collected_at",
+)
+_CATALOG_UPDATE_COLUMNS = tuple(column for column in _CATALOG_COLUMNS if column != "series_id")
+
+_CATALOG_SELECT_SQL = text(f"SELECT {', '.join(_CATALOG_COLUMNS)} FROM {_CATALOG_TABLE}")
+_CATALOG_INSERT_SQL = text(
+    f"INSERT INTO {_CATALOG_TABLE} ({', '.join(_CATALOG_COLUMNS)}) "
+    f"VALUES ({', '.join(f':{column}' for column in _CATALOG_COLUMNS)})"
+)
+_CATALOG_UPDATE_SQL = text(
+    f"UPDATE {_CATALOG_TABLE} SET "
+    f"{', '.join(f'{column}=:{column}' for column in _CATALOG_UPDATE_COLUMNS)} "
+    "WHERE series_id=:series_id"
+)
+
+
+def _catalog_row(series_id: str, fields: dict[str, str], collected_at: datetime) -> dict[str, Any]:
+    """Shape one workbook catalog entry into a crosswalk row."""
+    return {
+        "series_id": series_id,
+        "classification_code": fields["code"],
+        "name": fields["name"],
+        "native_id": fields.get("native_id") or None,
+        "mapped_series_id": fields.get("mapped_series_id") or None,
+        "dataset": fields["dataset"],
+        "source_url": fields["source_url"],
+        "collected_at": collected_at,
+    }
+
+
+def upsert_original_weight_catalog(
+    conn: Connection,
+    catalog: dict[str, dict[str, str]],
+    collected_at: datetime,
+) -> tuple[int, int]:
+    """Write the crosswalk idempotently and return ``(inserted, updated)``.
+
+    A row is rewritten only when the source's own description of the identity
+    changed, so an unchanged rerun touches nothing. The crosswalk carries no
+    vintage: it describes what an identifier means, not an observed value.
+    """
+    if not catalog:
+        return 0, 0
+    existing = {
+        str(row["series_id"]): dict(row)
+        for row in conn.execute(_CATALOG_SELECT_SQL).mappings().all()
+    }
+    inserts: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+    for series_id, fields in sorted(catalog.items()):
+        row = _catalog_row(series_id, fields, collected_at)
+        current = existing.get(series_id)
+        if current is None:
+            inserts.append(row)
+            continue
+        if any(current.get(column) != row[column] for column in _CATALOG_UPDATE_COLUMNS[:-1]):
+            updates.append(row)
+    logger.info(
+        "Original weight catalog: %d entries, %d new, %d changed",
+        len(catalog),
+        len(inserts),
+        len(updates),
+    )
+    for start in range(0, len(inserts), BATCH_SIZE):
+        conn.execute(_CATALOG_INSERT_SQL, inserts[start : start + BATCH_SIZE])
+    for start in range(0, len(updates), BATCH_SIZE):
+        conn.execute(_CATALOG_UPDATE_SQL, updates[start : start + BATCH_SIZE])
+    return len(inserts), len(updates)
+
+
+_UNDOCUMENTED_SQL = text(
+    f"SELECT DISTINCT weights.series_id FROM {_TABLE} weights "
+    f"LEFT JOIN {_CATALOG_TABLE} crosswalk ON crosswalk.series_id = weights.series_id "
+    f"LEFT JOIN {_METADATA_TABLE} series ON series.series_id = weights.series_id "
+    "WHERE crosswalk.series_id IS NULL AND series.series_id IS NULL"
+)
+
+_DANGLING_MAPPING_SQL = text(
+    f"SELECT crosswalk.series_id, crosswalk.mapped_series_id FROM {_CATALOG_TABLE} crosswalk "
+    f"LEFT JOIN {_METADATA_TABLE} series ON series.series_id = crosswalk.mapped_series_id "
+    "WHERE crosswalk.mapped_series_id IS NOT NULL AND series.series_id IS NULL"
+)
+
+# Two workbook codes may legitimately claim one index series: COICOP division
+# 10 has a single group, so W1 lists Education as both `10` and `10.0`, under
+# the same CDID and with the same weight in every month. That is one published
+# series shown at two classification levels, not two weights to add up.
+#
+# What must never pass is a collision that is not that: codes carrying
+# different CDIDs, or carrying weights that disagree in any month. Either would
+# double count the series' official weight, and neither can be told from the
+# benign case by counting claimants alone.
+_COLLIDING_MAPPING_SQL = text(
+    "SELECT first.series_id, second.series_id, first.mapped_series_id "
+    f"FROM {_CATALOG_TABLE} first JOIN {_CATALOG_TABLE} second "
+    "  ON second.mapped_series_id = first.mapped_series_id "
+    "  AND second.series_id > first.series_id "
+    "WHERE first.mapped_series_id IS NOT NULL "
+    "  AND (COALESCE(first.native_id, '') <> COALESCE(second.native_id, '') "
+    "       OR EXISTS (SELECT 1 "
+    f"                 FROM {_TABLE} left_weight JOIN {_TABLE} right_weight "
+    "                   ON right_weight.reference_date = left_weight.reference_date "
+    "                   AND right_weight.vintage_date = left_weight.vintage_date "
+    "                 WHERE left_weight.series_id = first.series_id "
+    "                   AND right_weight.series_id = second.series_id "
+    "                   AND left_weight.weight <> right_weight.weight))"
+)
+
+
+def assert_weight_identity_contract(conn: Connection) -> None:
+    """Refuse to finish a run that leaves a weight identity unaccounted for.
+
+    Three ways the contract can break, all of them checked inside the write
+    transaction so a violation rolls the run back rather than being discovered
+    in the warehouse:
+
+    * a weight whose identity is neither a real series nor a documented
+      weight-only code -- the orphan the crosswalk exists to rule out;
+    * a crosswalk entry pointing at a Table 38 series that is not stored, which
+      is what a renamed or filtered-away index looks like;
+    * two workbook codes claiming the same index series with different CDIDs or
+      disagreeing weights, which would double count that series' official
+      weight. One published series listed at two classification levels -- same
+      CDID, same weight every month -- is the source's own shape and passes.
+    """
+    undocumented = [str(row[0]) for row in conn.execute(_UNDOCUMENTED_SQL)]
+    if undocumented:
+        raise ValueError(
+            f"{len(undocumented)} weight identities are neither stored series nor documented "
+            f"weight-only codes, e.g. {sorted(undocumented)[:5]}"
+        )
+    dangling = [(str(row[0]), str(row[1])) for row in conn.execute(_DANGLING_MAPPING_SQL)]
+    if dangling:
+        raise ValueError(f"Crosswalk maps weights onto series that are not stored: {dangling[:5]}")
+    colliding = [
+        (str(row[0]), str(row[1]), str(row[2])) for row in conn.execute(_COLLIDING_MAPPING_SQL)
+    ]
+    if colliding:
+        raise ValueError(
+            f"Workbook codes disagree while claiming the same index series: {colliding[:5]}"
+        )

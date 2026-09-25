@@ -162,6 +162,76 @@ those ten series only.
   `ALLGOODS`, `ALLSERVICES` and `0` denote the source analytical totals and the
   overall index. Consumption-segment weights use the segment's own series
   identifier, so `original_weights` joins directly to `metadata` for that layer.
+
+### The weight identity contract
+
+Table 38 indexes COICOP down to class level. W1 publishes weights below that
+level, and for analytical totals the index set does not carry, so
+`original_weights` holds more distinct identities than `metadata` does. A
+published weight is part of the official record: it is stored unmodified under
+the identity the workbook gives it, rather than dropped, renamed onto a parent
+or normalised away. The contract is therefore **not** that every weight
+identity is a series. It is:
+
+1. a weight identity is either a stored series or a documented weight-only code;
+2. every weight-only code is described in `original_weights_catalog`, carrying
+   its classification code, published label, CDID where the source gives one,
+   and the Table 38 series it maps to — or an explicit `NULL` when the source
+   publishes no index at that level;
+3. no two workbook codes claim the same index series, unless they are one
+   published series listed at two classification levels: same CDID, same weight
+   in every month.
+
+Rule 3 has exactly one instance in the live source. COICOP division 10 has a
+single group, so W1 lists Education as both `10` and `10.0` under CDID `CJUU`,
+with identical weights in all 228 published months. Accepting collisions
+blindly would hide a double count; refusing them outright would refuse the
+source. Both halves are tested.
+
+All three rules are asserted by `assert_weight_identity_contract()` inside the
+write transaction, so a violation rolls the run back rather than reaching the
+warehouse.
+
+This is what closes the recurring "319 W1 identities, many unmatched" finding.
+The 319 are real and correct, and the database now says what each one is:
+
+```sql
+SELECT 'W1 identities' AS fact, count(DISTINCT series_id)::text AS n
+  FROM collector_ons_cpi.original_weights WHERE series_id LIKE 'CPI_W1_%'
+UNION ALL SELECT 'documented in crosswalk', count(*)::text
+  FROM collector_ons_cpi.original_weights_catalog
+UNION ALL SELECT '  ..mapped to an index series', count(*)::text
+  FROM collector_ons_cpi.original_weights_catalog WHERE mapped_series_id IS NOT NULL
+UNION ALL SELECT '  ..weight-only, no published index', count(*)::text
+  FROM collector_ons_cpi.original_weights_catalog WHERE mapped_series_id IS NULL
+UNION ALL SELECT 'unaccounted (must be 0)', count(DISTINCT w.series_id)::text
+  FROM collector_ons_cpi.original_weights w
+  LEFT JOIN collector_ons_cpi.original_weights_catalog c ON c.series_id = w.series_id
+  LEFT JOIN collector_ons_cpi.metadata m ON m.series_id = w.series_id
+  WHERE c.series_id IS NULL AND m.series_id IS NULL;
+```
+
+Executed against a full build on PostgreSQL 16.13 on 2026-09-25:
+
+| Fact | Rows |
+| --- | ---: |
+| W1 identities in `original_weights` | 319 |
+| Documented in `original_weights_catalog` | 319 |
+| ..mapped to an index series | 123 |
+| ..weight-only, no published index | 196 |
+| Unaccounted weight identities | **0** |
+| Crosswalk entries pointing at a series not stored | **0** |
+
+The 196 weight-only codes are the 5-digit COICOP levels (`01.1.1.1` Rice,
+`12.7.0.3` Funeral services and so on) plus `ALLGOODS`/`ALLSERVICES`, which W1
+weights and Table 38 does not index. `original_weights_catalog` is a plain
+dimension table keyed by `series_id` and carries no vintage: it describes what
+an identifier means, not an observed value, so a relabelled code is corrected
+in place rather than duplicated.
+
+No migration is required for an existing database. The table is created by
+`init_db()` with `CREATE TABLE IF NOT EXISTS` and populated by the next run;
+no existing row in any table is read, rewritten or deleted.
 - `weights` stores local operational shares for each immediate parent. The root
   and standalone analytical aggregates receive 1.0. These shares multiply
   monthly index relatives directly; consumers must not price-update them again.

@@ -27,6 +27,7 @@ METADATA_TABLE = "metadata"
 TIME_SERIES_TABLE = "time_series"
 WEIGHTS_TABLE = "weights"
 ORIGINAL_WEIGHTS_TABLE = "original_weights"
+ORIGINAL_WEIGHTS_CATALOG_TABLE = "original_weights_catalog"
 LOGS_TABLE = "logs"
 
 START_DATE_LOOKBACK_MONTHS = 5
