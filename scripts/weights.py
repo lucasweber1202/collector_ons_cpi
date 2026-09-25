@@ -21,7 +21,7 @@ _LEGACY_GUARD_SQL = text(f"SELECT COUNT(*) FROM {_TABLE} WHERE weight > 1 OR wei
 
 def assert_operational_storage(conn: Connection) -> None:
     """Refuse to mix legacy baskets in parts per thousand with local shares."""
-    legacy = conn.execute(_LEGACY_GUARD_SQL).scalar_one()
+    legacy: int = conn.execute(_LEGACY_GUARD_SQL).scalar_one()
     if legacy:
         raise ValueError(
             "weights contains legacy basket points; archive/rebuild this table "
